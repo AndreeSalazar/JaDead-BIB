@@ -49,6 +49,11 @@ pub extern "C" fn jdb_print_str(ptr: *const u8, len: u32) {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn jdb_print_int(val: i64) {
+    println!("{}", val);
+}
+
 #[derive(Debug, Clone)]
 pub struct CpuFeatures {
     pub has_avx2: bool,

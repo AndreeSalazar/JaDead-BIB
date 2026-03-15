@@ -55,7 +55,7 @@ fn main() {
     }
 
     let is_step_mode = mode == "step";
-    let is_run_mode = mode == "run";
+    let _is_run_mode = mode == "run";
     let file_path = &args[2];
 
     if is_step_mode || true {

@@ -484,11 +484,10 @@ impl JaParser {
     }
 
     fn parse_stmt(&mut self) -> Result<JaStmt, String> {
-        // Very basic stub to build AST: Blocks, Ifs, Returns, Exprs
-        if self.check(&JaToken::LBrace) {
-            return Ok(JaStmt::Block(self.parse_block()?));
-        }
-        
+        if self.check(&JaToken::LBrace) { return Ok(JaStmt::Block(self.parse_block()?)); }
+        if self.match_token(&JaToken::If) { return self.parse_if_stmt(); }
+        if self.match_token(&JaToken::While) { return self.parse_while_stmt(); }
+        if self.match_token(&JaToken::For) { return self.parse_for_stmt(); }
         if self.match_token(&JaToken::Return) {
             let expr = if self.match_token(&JaToken::Semicolon) { None } else {
                 let e = self.parse_expr()?;
@@ -498,23 +497,208 @@ impl JaParser {
             return Ok(JaStmt::Return(expr));
         }
 
-        let expr = self.parse_expr()?;
-        if self.match_token(&JaToken::Assign) {
-            let val = self.parse_expr()?;
-            self.consume(&JaToken::Semicolon, "after assignment")?;
-            return Ok(JaStmt::Expr(JaExpr::Assign { 
-                op: JaAssignOp::Assign, 
-                target: Box::new(expr), 
-                value: Box::new(val) 
-            }));
+        if self.is_local_var_decl() {
+            let ty = self.parse_type()?;
+            let name = self.parse_identifier()?;
+            let mut init = None;
+            if self.match_token(&JaToken::Assign) {
+                init = Some(self.parse_expr()?);
+            }
+            self.consume(&JaToken::Semicolon, "after local var decl")?;
+            return Ok(JaStmt::LocalVarDecl { ty, declarators: vec![JaVarDeclarator { name, init }] });
         }
 
+        let expr = self.parse_expr()?;
         self.consume(&JaToken::Semicolon, "after statement")?;
         Ok(JaStmt::Expr(expr))
     }
 
+    fn parse_if_stmt(&mut self) -> Result<JaStmt, String> {
+        self.consume(&JaToken::LParen, "if condition start")?;
+        let cond = self.parse_expr()?;
+        self.consume(&JaToken::RParen, "if condition end")?;
+        let then_branch = Box::new(self.parse_stmt()?);
+        let else_branch = if self.match_token(&JaToken::Else) {
+            Some(Box::new(self.parse_stmt()?))
+        } else { None };
+        Ok(JaStmt::If { cond, then_branch, else_branch })
+    }
+
+    fn parse_while_stmt(&mut self) -> Result<JaStmt, String> {
+        self.consume(&JaToken::LParen, "while cond start")?;
+        let cond = self.parse_expr()?;
+        self.consume(&JaToken::RParen, "while cond end")?;
+        let body = Box::new(self.parse_stmt()?);
+        Ok(JaStmt::While { cond, body })
+    }
+
+    fn parse_for_stmt(&mut self) -> Result<JaStmt, String> {
+        self.consume(&JaToken::LParen, "for start")?;
+        let init = if self.match_token(&JaToken::Semicolon) { None } else {
+            if self.is_local_var_decl() {
+                let ty = self.parse_type()?;
+                let name = self.parse_identifier()?;
+                let mut var_init = None;
+                if self.match_token(&JaToken::Assign) { var_init = Some(self.parse_expr()?); }
+                self.consume(&JaToken::Semicolon, "for init")?;
+                Some(Box::new(JaStmt::LocalVarDecl { ty, declarators: vec![JaVarDeclarator { name, init: var_init }] }))
+            } else {
+                let expr = self.parse_expr()?;
+                self.consume(&JaToken::Semicolon, "for expr init")?;
+                Some(Box::new(JaStmt::Expr(expr)))
+            }
+        };
+        let cond = if self.check(&JaToken::Semicolon) { None } else { Some(self.parse_expr()?) };
+        self.consume(&JaToken::Semicolon, "for cond")?;
+        
+        let mut update = Vec::new();
+        if !self.check(&JaToken::RParen) {
+            update.push(self.parse_expr()?);
+        }
+        self.consume(&JaToken::RParen, "for end")?;
+        
+        let body = Box::new(self.parse_stmt()?);
+        Ok(JaStmt::For { init, cond, update, body })
+    }
+
+    fn is_local_var_decl(&self) -> bool {
+        let mut p = self.pos;
+        let mut ok = false;
+        if let Some(tok) = self.tokens.get(p) {
+            match tok {
+                JaToken::Int | JaToken::Long | JaToken::Float | JaToken::Double | JaToken::Boolean | JaToken::Char | JaToken::Byte | JaToken::Short => {
+                    ok = true; p += 1;
+                }
+                JaToken::Identifier(_) => {
+                    p += 1;
+                    while let Some(JaToken::Dot) = self.tokens.get(p) {
+                        p += 1;
+                        if let Some(JaToken::Identifier(_)) = self.tokens.get(p) { p += 1; } else { return false; }
+                    }
+                    if let Some(JaToken::Less) = self.tokens.get(p) {
+                        let mut depth = 1; p += 1;
+                        while depth > 0 && p < self.tokens.len() {
+                            match self.tokens.get(p).unwrap() {
+                                JaToken::Less => depth += 1,
+                                JaToken::Greater => depth -= 1,
+                                _ => {}
+                            }
+                            p += 1;
+                        }
+                    }
+                    ok = true;
+                }
+                _ => return false,
+            }
+        }
+        if !ok { return false; }
+        while let Some(JaToken::LBracket) = self.tokens.get(p) {
+            p += 1;
+            if let Some(JaToken::RBracket) = self.tokens.get(p) { p += 1; } else { return false; }
+        }
+        if let Some(JaToken::Identifier(_)) = self.tokens.get(p) { return true; }
+        false
+    }
+
     fn parse_expr(&mut self) -> Result<JaExpr, String> {
-        self.parse_primary_or_access()
+        self.parse_assignment()
+    }
+
+    fn parse_assignment(&mut self) -> Result<JaExpr, String> {
+        let left = self.parse_equality()?;
+        if self.match_token(&JaToken::Assign) {
+            let right = self.parse_assignment()?;
+            Ok(JaExpr::Assign { op: JaAssignOp::Assign, target: Box::new(left), value: Box::new(right) })
+        } else if self.match_token(&JaToken::PlusAssign) {
+            let right = self.parse_assignment()?;
+            Ok(JaExpr::Assign { op: JaAssignOp::AddAssign, target: Box::new(left), value: Box::new(right) })
+        } else {
+            Ok(left)
+        }
+    }
+
+    fn parse_equality(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_relational()?;
+        while let Some(tok) = self.peek() {
+            let op = match tok {
+                JaToken::EqEq => JaBinOp::Eq,
+                JaToken::NotEq => JaBinOp::Neq,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_relational()?;
+            expr = JaExpr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_relational(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_additive()?;
+        while let Some(tok) = self.peek() {
+            let op = match tok {
+                JaToken::Less => JaBinOp::Lt,
+                JaToken::Greater => JaBinOp::Gt,
+                JaToken::LessEq => JaBinOp::Le,
+                JaToken::GreaterEq => JaBinOp::Ge,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_additive()?;
+            expr = JaExpr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_additive(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_multiplicative()?;
+        while let Some(tok) = self.peek() {
+            let op = match tok {
+                JaToken::Plus => JaBinOp::Add,
+                JaToken::Minus => JaBinOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_multiplicative()?;
+            expr = JaExpr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_multiplicative(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_unary()?;
+        while let Some(tok) = self.peek() {
+            let op = match tok {
+                JaToken::Star => JaBinOp::Mul,
+                JaToken::Slash => JaBinOp::Div,
+                JaToken::Percent => JaBinOp::Rem,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_unary()?;
+            expr = JaExpr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_unary(&mut self) -> Result<JaExpr, String> {
+        if self.match_token(&JaToken::Minus) {
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Unary { op: JaUnaryOp::Minus, expr: Box::new(expr), is_postfix: false });
+        } else if self.match_token(&JaToken::Not) {
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Unary { op: JaUnaryOp::Not, expr: Box::new(expr), is_postfix: false });
+        }
+        
+        if self.match_token(&JaToken::PlusPlus) {
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Unary { op: JaUnaryOp::Inc, expr: Box::new(expr), is_postfix: false });
+        }
+
+        let mut expr = self.parse_primary_or_access()?;
+        if self.match_token(&JaToken::PlusPlus) {
+            expr = JaExpr::Unary { op: JaUnaryOp::Inc, expr: Box::new(expr), is_postfix: true };
+        }
+        Ok(expr)
     }
 
     fn parse_primary_or_access(&mut self) -> Result<JaExpr, String> {

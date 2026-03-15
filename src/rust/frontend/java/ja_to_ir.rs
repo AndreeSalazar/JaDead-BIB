@@ -182,7 +182,7 @@ impl JaToIrGenerator {
                 let ir_expr = self.generate_expr(e, func)?;
                 // Emit side-effecting expressions (Calls or Native Prints)
                 match ir_expr {
-                    IRInstruction::Call { .. } | IRInstruction::PrintStr(_) => {
+                    IRInstruction::Call { .. } | IRInstruction::PrintStr(_) | IRInstruction::PrintInt => {
                         func.body.push(ir_expr);
                     }
                     _ => {}
@@ -199,8 +199,8 @@ impl JaToIrGenerator {
                     
                     if let Some(init_expr) = &decl.init {
                         let val = self.generate_expr(init_expr, func)?;
+                        func.body.push(val); 
                         func.body.push(IRInstruction::Store(decl.name.clone()));
-                        func.body.push(val); // In actual ADeadOp, Store usually takes the val as argument, but keeping semantics simple here.
                     }
                 }
                 Ok(())
@@ -261,9 +261,40 @@ impl JaToIrGenerator {
                 
                 // [GC PLUS] Loop End: Free Object Pool
                 func.body.push(IRInstruction::Label(end_label));
-                let popped_pool = self.loop_anticipator.exit_loop()?;
-                func.body.push(IRInstruction::GCPlusLoopFree { pool_ptr: popped_pool });
 
+                Ok(())
+            }
+            JaStmt::For { init, cond, update, body } => {
+                if let Some(init_stmt) = init {
+                    self.generate_stmt(init_stmt, func)?;
+                }
+                
+                let start_label = self.next_label("for_start");
+                let end_label = self.next_label("for_end");
+                
+                func.body.push(IRInstruction::Label(start_label.clone()));
+                
+                if let Some(cond_expr) = cond {
+                    let cond_val = self.generate_expr(cond_expr, func)?;
+                    func.body.push(cond_val);
+                    func.body.push(IRInstruction::BranchIfFalse(end_label.clone()));
+                }
+                
+                self.generate_stmt(body, func)?;
+                
+                for u in update {
+                    let u_ir = self.generate_expr(u, func)?;
+                    match u_ir {
+                        IRInstruction::Call { .. } | IRInstruction::Store(_) | IRInstruction::PropertySet { .. } => {
+                            func.body.push(u_ir);
+                        }
+                        _ => {}
+                    }
+                }
+                
+                func.body.push(IRInstruction::Jump(start_label));
+                func.body.push(IRInstruction::Label(end_label));
+                
                 Ok(())
             }
             _ => Ok(()) // Stub
@@ -331,20 +362,60 @@ impl JaToIrGenerator {
             JaExpr::Binary { op, left, right } => {
                 let l = Box::new(self.generate_expr(left, func)?);
                 let r = Box::new(self.generate_expr(right, func)?);
-                let ir_op = match op {
-                    JaBinOp::Add => IROp::Add,
-                    JaBinOp::Sub => IROp::Sub,
-                    JaBinOp::Mul => IROp::Mul,
-                    JaBinOp::Div => IROp::Div,
-                    JaBinOp::Rem => IROp::Mod,
-                    JaBinOp::Shl => IROp::Shl,
-                    JaBinOp::Shr => IROp::Shr,
-                    JaBinOp::BitAnd => IROp::And,
-                    JaBinOp::BitOr => IROp::Or,
-                    JaBinOp::BitXor => IROp::Xor,
-                    _ => IROp::Add // Fallback
-                };
-                Ok(IRInstruction::BinOp { op: ir_op, left: l, right: r })
+                match op {
+                    JaBinOp::Add | JaBinOp::Sub | JaBinOp::Mul | JaBinOp::Div | JaBinOp::Rem | 
+                    JaBinOp::Shl | JaBinOp::Shr | JaBinOp::BitAnd | JaBinOp::BitOr | JaBinOp::BitXor => {
+                        let ir_op = match op {
+                            JaBinOp::Add => IROp::Add,
+                            JaBinOp::Sub => IROp::Sub,
+                            JaBinOp::Mul => IROp::Mul,
+                            JaBinOp::Div => IROp::Div,
+                            JaBinOp::Rem => IROp::Mod,
+                            JaBinOp::Shl => IROp::Shl,
+                            JaBinOp::Shr => IROp::Shr,
+                            JaBinOp::BitAnd => IROp::And,
+                            JaBinOp::BitOr => IROp::Or,
+                            JaBinOp::BitXor => IROp::Xor,
+                            _ => unreachable!()
+                        };
+                        Ok(IRInstruction::BinOp { op: ir_op, left: l, right: r })
+                    }
+                    JaBinOp::Eq | JaBinOp::Neq | JaBinOp::Lt | JaBinOp::Gt | JaBinOp::Le | JaBinOp::Ge => {
+                        let ir_cmp = match op {
+                            JaBinOp::Eq => IRCmpOp::Eq,
+                            JaBinOp::Neq => IRCmpOp::Ne,
+                            JaBinOp::Lt => IRCmpOp::Lt,
+                            JaBinOp::Gt => IRCmpOp::Gt,
+                            JaBinOp::Le => IRCmpOp::Le,
+                            JaBinOp::Ge => IRCmpOp::Ge,
+                            _ => unreachable!()
+                        };
+                        Ok(IRInstruction::Compare { op: ir_cmp, left: l, right: r })
+                    }
+                    _ => Err(format!("Unsupported binary op {:?}", op))
+                }
+            }
+            JaExpr::Unary { op, expr, is_postfix: _ } => {
+                match op {
+                    JaUnaryOp::Inc => {
+                        if let JaExpr::Name(n) = &**expr {
+                            let add = IRInstruction::BinOp { 
+                                op: IROp::Add, 
+                                left: Box::new(IRInstruction::Load(n.clone())), 
+                                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))) 
+                            };
+                            func.body.push(add);
+                            Ok(IRInstruction::Store(n.clone()))
+                        } else {
+                            Err("Unsupported inc target".to_string())
+                        }
+                    }
+                    JaUnaryOp::Minus => {
+                        let e = Box::new(self.generate_expr(expr, func)?);
+                        Ok(IRInstruction::BinOp { op: IROp::Sub, left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(0))), right: e })
+                    }
+                    _ => Err(format!("Unsupported unary op {:?}", op))
+                }
             }
             JaExpr::MethodCall { name, args, .. } => {
                 let mut ir_args = Vec::new();
@@ -354,9 +425,14 @@ impl JaToIrGenerator {
                 
                 // Built-in mapping -> print maps to ADeadOp native Print
                 if name == "System.out.println" || name == "println" || name == "print" {
-                    // For string literals
-                    if let Some(IRInstruction::LoadString(s)) = ir_args.first() {
-                         return Ok(IRInstruction::PrintStr(s.clone()));
+                    if let Some(arg) = ir_args.first() {
+                        match arg {
+                            IRInstruction::LoadString(s) => return Ok(IRInstruction::PrintStr(s.clone())),
+                            _ => {
+                                func.body.push(arg.clone()); // put arg in rax
+                                return Ok(IRInstruction::PrintInt);
+                            }
+                        }
                     }
                 }
 
