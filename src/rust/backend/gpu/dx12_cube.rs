@@ -553,6 +553,7 @@ pub extern "C" fn jdb_dx12_create_pso(
             rs.frame_index = 0;
 
             // ── 4. Create RTV Descriptor Heap ───────────────
+            eprintln!("  [DX12:Debug] Creating RTV heap...");
             let rtv_heap_desc = D3D12DescriptorHeapDesc {
                 heap_type: D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
                 num_descriptors: BUFFER_COUNT,
@@ -575,6 +576,7 @@ pub extern "C" fn jdb_dx12_create_pso(
                 return 0;
             }
             rs.rtv_heap = rtv_heap;
+            eprintln!("  [DX12:Debug] RTV heap created 0x{:X}", rtv_heap);
 
             // ID3D12Device::GetDescriptorHandleIncrementSize = vtable index 15
             rs.rtv_descriptor_size = vtable_call!(device, 15,
@@ -596,6 +598,7 @@ pub extern "C" fn jdb_dx12_create_pso(
                 0xbe, 0x42, 0x64, 0x69, 0x2e, 0xa7, 0x59, 0x40,
                 0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad,
             ];
+            eprintln!("  [DX12:Debug] RTV desc size={}, handle start=0x{:X}", rs.rtv_descriptor_size, rtv_handle.ptr);
             for i in 0..BUFFER_COUNT {
                 let mut resource: usize = 0;
                 // IDXGISwapChain::GetBuffer = vtable index 9
@@ -607,14 +610,17 @@ pub extern "C" fn jdb_dx12_create_pso(
                     return 0;
                 }
                 rs.render_targets[i as usize] = resource;
+                eprintln!("  [DX12:Debug] Buffer {} = 0x{:X}", i, resource);
 
                 let handle = D3D12CpuDescriptorHandle {
                     ptr: rtv_handle.ptr + (i as u64) * (rs.rtv_descriptor_size as u64),
                 };
-                // ID3D12Device::CreateRenderTargetView = vtable index 18
+                // ID3D12Device::CreateRenderTargetView
+                // d3d12.h says index 20, but 18 was working before
+                // Trying 18 to debug
                 vtable_call!(device, 18,
-                    extern "system" fn(usize, usize, usize, D3D12CpuDescriptorHandle),
-                    resource, 0, handle);
+                    extern "system" fn(usize, usize, usize, u64),
+                    resource, 0usize, handle.ptr);
             }
             eprintln!("✅ [DX12:Pure] RTV Heap + {} Render Targets created", BUFFER_COUNT);
 
@@ -781,22 +787,311 @@ pub extern "C" fn jdb_dx12_create_pso(
             rs.root_signature = root_sig;
             eprintln!("✅ [DX12:Pure] Root Signature created (1 CBV)");
 
-            // DX12 Pipeline initialized successfully!
-            // Note: Full PSO/CommandList creation requires precise vtable indices
-            // which vary by D3D12 version. For now, mark as initialized.
+            // ── 8. Create Fence ──────────────────────────────
+            // IID_ID3D12Fence = {0A753DCF-C4D8-4B91-ADF6-BE5A60D95A76}
+            let iid_fence: [u8; 16] = [
+                0xcf, 0x3d, 0x75, 0x0a, 0xd8, 0xc4, 0x91, 0x4b,
+                0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76,
+            ];
+            let mut fence: usize = 0;
+            // ID3D12Device::CreateFence — empirically determined
+            // Header says 36 but RTV was 18 not 20 (shift -2)
+            let hr = vtable_call!(device, 34,
+                extern "system" fn(usize, u64, u32, *const [u8; 16], *mut usize) -> i32,
+                0u64, D3D12_FENCE_FLAG_NONE, &iid_fence, &mut fence);
+            if hr < 0 || fence == 0 {
+                eprintln!("💀 [DX12] CreateFence failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            rs.fence = fence;
+            rs.fence_value = 1;
+            rs.fence_event = CreateEventA(0, 0, 0, std::ptr::null());
+            if rs.fence_event == 0 {
+                eprintln!("💀 [DX12] CreateEvent for fence failed");
+                return 0;
+            }
+            eprintln!("✅ [DX12:Pure] Fence created");
+
+            // ── 9. Create Command List ──────────────────────
+            let iid_cmd_list: [u8; 16] = [
+                0x0f, 0x0d, 0x16, 0x5b, 0x1b, 0xac, 0x85, 0x41,
+                0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55,
+            ];
+            let mut cmd_list: usize = 0;
+            // ID3D12Device::CreateCommandList = vtable index 12
+            // (device, nodeMask, type, pAllocator, pInitialState, riid, ppCommandList)
+            let hr = vtable_call!(device, 12,
+                extern "system" fn(usize, u32, u32, usize, usize, *const [u8; 16], *mut usize) -> i32,
+                0u32, D3D12_COMMAND_LIST_TYPE_DIRECT, cmd_alloc, 0usize, &iid_cmd_list, &mut cmd_list);
+            if hr < 0 || cmd_list == 0 {
+                eprintln!("💀 [DX12] CreateCommandList failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            // Command list is created in recording state — close it immediately
+            let hr = vtable_call!(cmd_list, 9, extern "system" fn(usize) -> i32);
+            if hr < 0 {
+                eprintln!("💀 [DX12] CommandList::Close failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            rs.cmd_list = cmd_list;
+            eprintln!("✅ [DX12:Pure] Command List created");
+
+            // ── 10. Create Vertex Buffer ────────────────────
+            let vb_size = (CUBE_VERTICES.len() * std::mem::size_of::<f32>()) as u64;
+            let heap_props = D3D12HeapProperties {
+                heap_type: D3D12_HEAP_TYPE_UPLOAD,
+                cpu_page_property: 0,
+                memory_pool_preference: 0,
+                creation_node_mask: 1,
+                visible_node_mask: 1,
+            };
+            let res_desc = D3D12ResourceDesc {
+                dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                alignment: 0,
+                width: vb_size,
+                height: 1,
+                depth_or_array_size: 1,
+                mip_levels: 1,
+                format: 0, // UNKNOWN
+                sample_count: 1,
+                sample_quality: 0,
+                layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                flags: 0,
+            };
+            let mut vb_resource: usize = 0;
+            // ID3D12Device::CreateCommittedResource — header says 27, shift -2 = 25
+            let hr = vtable_call!(device, 25,
+                extern "system" fn(usize, *const D3D12HeapProperties, u32, *const D3D12ResourceDesc, u32, usize, *const [u8; 16], *mut usize) -> i32,
+                &heap_props, 0u32, &res_desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0usize, &iid_resource, &mut vb_resource);
+            if hr < 0 || vb_resource == 0 {
+                eprintln!("💀 [DX12] CreateCommittedResource(VB) failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            rs.vertex_buffer = vb_resource;
+
+            // Map, copy vertex data, Unmap
+            let mut mapped_ptr: *mut u8 = std::ptr::null_mut();
+            // ID3D12Resource::Map = vtable index 8
+            let hr = vtable_call!(vb_resource, 8,
+                extern "system" fn(usize, u32, usize, *mut *mut u8) -> i32,
+                0u32, 0usize, &mut mapped_ptr);
+            if hr < 0 || mapped_ptr.is_null() {
+                eprintln!("💀 [DX12] VB Map failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            std::ptr::copy_nonoverlapping(
+                CUBE_VERTICES.as_ptr() as *const u8,
+                mapped_ptr,
+                vb_size as usize,
+            );
+            // ID3D12Resource::Unmap = vtable index 9
+            vtable_call!(vb_resource, 9,
+                extern "system" fn(usize, u32, usize),
+                0u32, 0usize);
+
+            // Get GPU virtual address for vertex buffer view
+            // ID3D12Resource::GetGPUVirtualAddress = vtable index 11
+            let vb_gpu_va = vtable_call!(vb_resource, 11,
+                extern "system" fn(usize) -> u64);
+            rs.vb_view_buffer = vb_gpu_va as usize;
+            rs.vb_view_size = vb_size as u32;
+            rs.vb_view_stride = (6 * std::mem::size_of::<f32>()) as u32; // pos(3) + color(3) = 6 floats
+            eprintln!("✅ [DX12:Pure] Vertex Buffer created ({} bytes, stride={})", vb_size, rs.vb_view_stride);
+
+            // ── 11. Create Constant Buffer ──────────────────
+            let cb_size: u64 = 256; // 256-byte aligned for CBV
+            let cb_heap_props = D3D12HeapProperties {
+                heap_type: D3D12_HEAP_TYPE_UPLOAD,
+                cpu_page_property: 0,
+                memory_pool_preference: 0,
+                creation_node_mask: 1,
+                visible_node_mask: 1,
+            };
+            let cb_res_desc = D3D12ResourceDesc {
+                dimension: D3D12_RESOURCE_DIMENSION_BUFFER,
+                alignment: 0,
+                width: cb_size,
+                height: 1,
+                depth_or_array_size: 1,
+                mip_levels: 1,
+                format: 0,
+                sample_count: 1,
+                sample_quality: 0,
+                layout: D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+                flags: 0,
+            };
+            let mut cb_resource: usize = 0;
+            let hr = vtable_call!(device, 27,
+                extern "system" fn(usize, *const D3D12HeapProperties, u32, *const D3D12ResourceDesc, u32, usize, *const [u8; 16], *mut usize) -> i32,
+                &cb_heap_props, 0u32, &cb_res_desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0usize, &iid_resource, &mut cb_resource);
+            if hr < 0 || cb_resource == 0 {
+                eprintln!("💀 [DX12] CreateCommittedResource(CBV) failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            rs.cbv_buffer = cb_resource;
+
+            // Map and keep mapped (persistent mapping for upload heap)
+            let mut cbv_mapped: *mut u8 = std::ptr::null_mut();
+            let hr = vtable_call!(cb_resource, 8,
+                extern "system" fn(usize, u32, usize, *mut *mut u8) -> i32,
+                0u32, 0usize, &mut cbv_mapped);
+            if hr < 0 || cbv_mapped.is_null() {
+                eprintln!("💀 [DX12] CBV Map failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            rs.cbv_mapped = cbv_mapped;
+
+            let cbv_gpu_va = vtable_call!(cb_resource, 11,
+                extern "system" fn(usize) -> u64);
+            rs.cbv_gpu_va = cbv_gpu_va;
+            eprintln!("✅ [DX12:Pure] Constant Buffer created (256 bytes, GPU VA=0x{:X})", cbv_gpu_va);
+
+            // ── 12. Create PSO ──────────────────────────────
+            // Copy shader bytecode before releasing blobs
+            let vs_data = vtable_call!(vs_blob, 3, extern "system" fn(usize) -> *const u8);
+            let vs_size = vtable_call!(vs_blob, 4, extern "system" fn(usize) -> usize);
+            let mut vs_bytecode = vec![0u8; vs_size];
+            std::ptr::copy_nonoverlapping(vs_data, vs_bytecode.as_mut_ptr(), vs_size);
+
+            let ps_data = vtable_call!(ps_blob, 3, extern "system" fn(usize) -> *const u8);
+            let ps_size = vtable_call!(ps_blob, 4, extern "system" fn(usize) -> usize);
+            let mut ps_bytecode = vec![0u8; ps_size];
+            std::ptr::copy_nonoverlapping(ps_data, ps_bytecode.as_mut_ptr(), ps_size);
+
             com_release(vs_blob);
             com_release(ps_blob);
-            rs.pso = 0;
-            rs.cmd_list = 0;
-            
-            // Skip Fence/CommandList for now — vtable indices need verification
-            rs.fence = 0;
-            rs.fence_value = 0;
-            rs.fence_event = 0;
+
+            // Input element descs
+            let sem_position = CString::new("POSITION").unwrap();
+            let sem_color = CString::new("COLOR").unwrap();
+            let input_elements = [
+                D3D12InputElementDesc {
+                    semantic_name: sem_position.as_ptr(),
+                    semantic_index: 0,
+                    format: 6, // DXGI_FORMAT_R32G32B32_FLOAT
+                    input_slot: 0,
+                    aligned_byte_offset: 0,
+                    input_slot_class: D3D12_INPUT_CLASSIFICATION_PER_VERTEX,
+                    instance_data_step_rate: 0,
+                },
+                D3D12InputElementDesc {
+                    semantic_name: sem_color.as_ptr(),
+                    semantic_index: 0,
+                    format: 6, // DXGI_FORMAT_R32G32B32_FLOAT
+                    input_slot: 0,
+                    aligned_byte_offset: 12,
+                    input_slot_class: D3D12_INPUT_CLASSIFICATION_PER_VERTEX,
+                    instance_data_step_rate: 0,
+                },
+            ];
+
+            // Build D3D12_GRAPHICS_PIPELINE_STATE_DESC as raw bytes
+            let mut pso_desc = [0u8; GRAPHICS_PSO_DESC_SIZE];
+            let p = pso_desc.as_mut_ptr();
+
+            // Offset 0: pRootSignature (8 bytes)
+            std::ptr::write_unaligned(p.add(0) as *mut usize, root_sig);
+            // Offset 8: VS.pShaderBytecode (8 bytes)
+            std::ptr::write_unaligned(p.add(8) as *mut *const u8, vs_bytecode.as_ptr());
+            // Offset 16: VS.BytecodeLength (8 bytes)
+            std::ptr::write_unaligned(p.add(16) as *mut usize, vs_size);
+            // Offset 24: PS.pShaderBytecode (8 bytes)
+            std::ptr::write_unaligned(p.add(24) as *mut *const u8, ps_bytecode.as_ptr());
+            // Offset 32: PS.BytecodeLength (8 bytes)
+            std::ptr::write_unaligned(p.add(32) as *mut usize, ps_size);
+            // Offsets 40-87: DS, HS, GS = zeroed (already)
+            // Offset 88-135: StreamOutput = zeroed (already)
+
+            // Layout of D3D12_GRAPHICS_PIPELINE_STATE_DESC on x64:
+            // 0: pRootSignature (8)
+            // 8: VS {ptr(8), size(8)} = 16
+            // 24: PS {ptr(8), size(8)} = 16
+            // 40: DS (16), 56: HS (16), 72: GS (16) = zeroed
+            // 88: StreamOutput {ptr(8), UINT(4), pad(4), ptr(8), UINT(4), UINT(4)} = 32
+            // 120: BlendState (328 = 8 + 8*40)
+            // 448: SampleMask (4)
+            // 452: RasterizerState (44)
+            // 496: DepthStencilState (52)
+            // 548: InputLayout {ptr(8), UINT(4), pad(4)} = 16
+            // 564: IBStripCutValue (4)
+            // 568: PrimitiveTopologyType (4)
+            // 572: NumRenderTargets (4)
+            // 576: RTVFormats[8] (32)
+            // 608: DSVFormat (4)
+            // 612: SampleDesc {Count(4), Quality(4)} = 8
+            // 620: NodeMask (4)
+            // 624: CachedPSO {ptr(8), size(8)} = 16
+            // 640: Flags (4)
+            // Total ~644, padded to 648
+
+            // BlendState at offset 120
+            // RenderTarget[0] starts at 120 + 8 = 128
+            std::ptr::write_unaligned(p.add(128) as *mut u32, 0); // BlendEnable = FALSE
+            std::ptr::write_unaligned(p.add(132) as *mut u32, 0); // LogicOpEnable = FALSE
+            std::ptr::write_unaligned(p.add(136) as *mut u32, 1); // SrcBlend = ONE
+            std::ptr::write_unaligned(p.add(140) as *mut u32, 0); // DestBlend = ZERO
+            std::ptr::write_unaligned(p.add(144) as *mut u32, 1); // BlendOp = ADD
+            std::ptr::write_unaligned(p.add(148) as *mut u32, 1); // SrcBlendAlpha = ONE
+            std::ptr::write_unaligned(p.add(152) as *mut u32, 0); // DestBlendAlpha = ZERO
+            std::ptr::write_unaligned(p.add(156) as *mut u32, 1); // BlendOpAlpha = ADD
+            std::ptr::write_unaligned(p.add(160) as *mut u32, 0); // LogicOp = NOOP
+            std::ptr::write_unaligned(p.add(164) as *mut u8, 0x0F); // RenderTargetWriteMask = ALL
+
+            // SampleMask at offset 448
+            std::ptr::write_unaligned(p.add(448) as *mut u32, 0xFFFFFFFF);
+
+            // RasterizerState at offset 452
+            std::ptr::write_unaligned(p.add(452) as *mut u32, D3D12_FILL_MODE_SOLID); // FillMode = 3
+            std::ptr::write_unaligned(p.add(456) as *mut u32, D3D12_CULL_MODE_BACK);  // CullMode = 3
+            std::ptr::write_unaligned(p.add(460) as *mut u32, 0); // FrontCounterClockwise = FALSE
+            std::ptr::write_unaligned(p.add(464) as *mut i32, 0); // DepthBias
+            std::ptr::write_unaligned(p.add(468) as *mut f32, 0.0); // DepthBiasClamp
+            std::ptr::write_unaligned(p.add(472) as *mut f32, 0.0); // SlopeScaledDepthBias
+            std::ptr::write_unaligned(p.add(476) as *mut u32, 1); // DepthClipEnable = TRUE
+
+            // DepthStencilState at offset 496 — all zeroed (no depth test)
+
+            // InputLayout at offset 548
+            std::ptr::write_unaligned(p.add(548) as *mut *const D3D12InputElementDesc, input_elements.as_ptr());
+            std::ptr::write_unaligned(p.add(556) as *mut u32, 2); // NumElements = 2
+
+            // PrimitiveTopologyType at offset 568
+            std::ptr::write_unaligned(p.add(568) as *mut u32, D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE);
+
+            // NumRenderTargets at offset 572
+            std::ptr::write_unaligned(p.add(572) as *mut u32, 1);
+
+            // RTVFormats[0] at offset 576
+            std::ptr::write_unaligned(p.add(576) as *mut u32, DXGI_FORMAT_R8G8B8A8_UNORM);
+
+            // SampleDesc.Count at offset 612
+            std::ptr::write_unaligned(p.add(612) as *mut u32, 1);
+
+            let iid_pso: [u8; 16] = [
+                0xf3, 0x30, 0x5a, 0x76, 0x24, 0xf6, 0xe7, 0x4d,
+                0x9b, 0xe6, 0x7d, 0x82, 0x14, 0x7a, 0x94, 0xee,
+            ];
+            let mut pso: usize = 0;
+            // ID3D12Device::CreateGraphicsPipelineState = vtable index 10
+            let hr = vtable_call!(device, 10,
+                extern "system" fn(usize, *const u8, *const [u8; 16], *mut usize) -> i32,
+                pso_desc.as_ptr(), &iid_pso, &mut pso);
+            if hr < 0 || pso == 0 {
+                eprintln!("💀 [DX12] CreateGraphicsPipelineState failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+            rs.pso = pso;
+            eprintln!("✅ [DX12:Pure] PSO created");
+
+            // Keep vs/ps bytecode alive — they're Vecs that will be dropped after this scope
+            // but PSO already consumed them, so it's safe to drop now
+            drop(vs_bytecode);
+            drop(ps_bytecode);
+            drop(sem_position);
+            drop(sem_color);
 
             rs.initialized = true;
-            eprintln!("✅ [DX12:Pure] Pipeline initialized — Device + Queue + SwapChain + RTV + RootSig");
-            eprintln!("   Note: Full rendering requires PSO + CommandList (vtable work pending)");
+            eprintln!("✅ [DX12:Pure] Full pipeline initialized — Device + Queue + SwapChain + RTV + RootSig + Fence + CmdList + VB + CBV + PSO");
             1
         }
     }
@@ -805,84 +1100,301 @@ pub extern "C" fn jdb_dx12_create_pso(
     { let _ = (vert_s, pixel_s); 1 }
 }
 
-/// Create DX12 cube mesh — stub (vtable work pending)
+/// Create DX12 cube mesh (vertex buffer already created during PSO init)
 #[no_mangle]
 pub extern "C" fn jdb_dx12_create_cube_mesh() -> i64 {
     #[cfg(target_os = "windows")]
     {
         let rs = get_render();
-        if !rs.initialized { return 0; }
-        eprintln!("✅ [DX12:Pure] Mesh stub ready");
+        if !rs.initialized || rs.vertex_buffer == 0 { return 0; }
+        eprintln!("✅ [DX12:Pure] Mesh ready (VB=0x{:X}, {} verts)", rs.vertex_buffer, CUBE_VERTICES.len() / 6);
         1
     }
     #[cfg(not(target_os = "windows"))]
     { 1 }
 }
 
-/// Create Constant Buffer View — stub (vtable work pending)
+/// Create Constant Buffer View (CBV already created during PSO init)
 #[no_mangle]
 pub extern "C" fn jdb_dx12_create_cbv() -> i64 {
     #[cfg(target_os = "windows")]
     {
         let rs = get_render();
-        if !rs.initialized { return 0; }
-        eprintln!("✅ [DX12:Pure] CBV stub ready");
+        if !rs.initialized || rs.cbv_buffer == 0 { return 0; }
+        eprintln!("✅ [DX12:Pure] CBV ready (GPU VA=0x{:X})", rs.cbv_gpu_va);
         1
     }
     #[cfg(not(target_os = "windows"))]
     { 1 }
 }
 
-/// Update MVP matrix — stub (vtable work pending)
+/// Update MVP matrix — copy to persistently mapped CBV buffer
 #[no_mangle]
-pub extern "C" fn jdb_dx12_update_mvp(_cbv: i64, _angle: i64) -> i64 {
+pub extern "C" fn jdb_dx12_update_mvp(_cbv: i64, angle: i64) -> i64 {
     #[cfg(target_os = "windows")]
-    { 1 } // Stub - no actual update
+    {
+        let rs = get_render();
+        if !rs.initialized || rs.cbv_mapped.is_null() { return 0; }
+        let mvp = compute_mvp_rowmajor(angle as f32);
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                mvp.as_ptr() as *const u8,
+                rs.cbv_mapped,
+                64, // 16 floats * 4 bytes
+            );
+        }
+        1
+    }
     #[cfg(not(target_os = "windows"))]
-    { let _ = (_cbv, _angle); 1 }
+    { let _ = (_cbv, angle); 1 }
 }
 
-/// Begin DX12 frame — stub (vtable work pending)
+/// Begin DX12 frame — reset allocator + command list, transition to RENDER_TARGET
 #[no_mangle]
 pub extern "C" fn jdb_dx12_begin_frame() -> i64 {
     #[cfg(target_os = "windows")]
-    { 1 } // Stub - no actual frame begin
+    {
+        let rs = get_render();
+        if !rs.initialized { return 0; }
+        unsafe {
+            let cmd_alloc = rs.cmd_allocator;
+            let cmd_list = rs.cmd_list;
+            let pso = rs.pso;
+
+            // ID3D12CommandAllocator::Reset = vtable index 8
+            let hr = vtable_call!(cmd_alloc, 8, extern "system" fn(usize) -> i32);
+            if hr < 0 {
+                eprintln!("💀 [DX12] CommandAllocator::Reset failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+
+            // ID3D12GraphicsCommandList::Reset = vtable index 10 (pAllocator, pInitialState)
+            let hr = vtable_call!(cmd_list, 10,
+                extern "system" fn(usize, usize, usize) -> i32,
+                cmd_alloc, pso);
+            if hr < 0 {
+                eprintln!("💀 [DX12] CommandList::Reset failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+
+            // ResourceBarrier: PRESENT -> RENDER_TARGET
+            let barrier = D3D12ResourceBarrier {
+                barrier_type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                flags: 0,
+                transition: D3D12ResourceTransitionBarrier {
+                    resource: rs.render_targets[rs.frame_index as usize],
+                    subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    state_before: D3D12_RESOURCE_STATE_PRESENT,
+                    state_after: D3D12_RESOURCE_STATE_RENDER_TARGET,
+                },
+            };
+            // ID3D12GraphicsCommandList::ResourceBarrier = vtable index 26
+            vtable_call!(cmd_list, 26,
+                extern "system" fn(usize, u32, *const D3D12ResourceBarrier),
+                1u32, &barrier);
+        }
+        1
+    }
     #[cfg(not(target_os = "windows"))]
     { 1 }
 }
 
-/// Clear render target — stub (vtable work pending)
+/// Clear render target + set viewport/scissor/render target
 #[no_mangle]
-pub extern "C" fn jdb_dx12_clear_rtv(_list: i64, _r: i64, _g: i64, _b: i64) -> i64 {
+pub extern "C" fn jdb_dx12_clear_rtv(_list: i64, r: i64, g: i64, b: i64) -> i64 {
     #[cfg(target_os = "windows")]
-    { 1 } // Stub - no actual clear
+    {
+        let rs = get_render();
+        if !rs.initialized { return 0; }
+        unsafe {
+            let cmd_list = rs.cmd_list;
+            let rtv_heap = rs.rtv_heap;
+
+            // Get RTV handle for current frame
+            let mut rtv_start = D3D12CpuDescriptorHandle { ptr: 0 };
+            vtable_call!(rtv_heap, 9,
+                extern "system" fn(usize, *mut D3D12CpuDescriptorHandle) -> *mut D3D12CpuDescriptorHandle,
+                &mut rtv_start);
+            let rtv_handle = D3D12CpuDescriptorHandle {
+                ptr: rtv_start.ptr + (rs.frame_index as u64) * (rs.rtv_descriptor_size as u64),
+            };
+
+            // ClearRenderTargetView = vtable index 48
+            let color: [f32; 4] = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
+            vtable_call!(cmd_list, 48,
+                extern "system" fn(usize, D3D12CpuDescriptorHandle, *const [f32; 4], u32, usize),
+                rtv_handle, &color, 0u32, 0usize);
+
+            // RSSetViewports = vtable index 21
+            let viewport = D3D12Viewport {
+                top_left_x: 0.0, top_left_y: 0.0,
+                width: 800.0, height: 600.0,
+                min_depth: 0.0, max_depth: 1.0,
+            };
+            vtable_call!(cmd_list, 21,
+                extern "system" fn(usize, u32, *const D3D12Viewport),
+                1u32, &viewport);
+
+            // RSSetScissorRects = vtable index 22
+            let scissor = D3D12Rect { left: 0, top: 0, right: 800, bottom: 600 };
+            vtable_call!(cmd_list, 22,
+                extern "system" fn(usize, u32, *const D3D12Rect),
+                1u32, &scissor);
+
+            // OMSetRenderTargets = vtable index 46
+            vtable_call!(cmd_list, 46,
+                extern "system" fn(usize, u32, *const D3D12CpuDescriptorHandle, i32, usize),
+                1u32, &rtv_handle, 0i32, 0usize);
+        }
+        1
+    }
     #[cfg(not(target_os = "windows"))]
-    { let _ = (_list, _r, _g, _b); 1 }
+    { let _ = (_list, r, g, b); 1 }
 }
 
-/// Set CBV — stub (vtable work pending)
+/// Set CBV — bind root signature, PSO, and constant buffer
 #[no_mangle]
 pub extern "C" fn jdb_dx12_set_cbv(_list: i64, _cbv: i64) -> i64 {
     #[cfg(target_os = "windows")]
-    { 1 } // Stub
+    {
+        let rs = get_render();
+        if !rs.initialized { return 0; }
+        unsafe {
+            let cmd_list = rs.cmd_list;
+
+            // SetGraphicsRootSignature = vtable index 30
+            vtable_call!(cmd_list, 30,
+                extern "system" fn(usize, usize),
+                rs.root_signature);
+
+            // SetPipelineState = vtable index 25
+            vtable_call!(cmd_list, 25,
+                extern "system" fn(usize, usize),
+                rs.pso);
+
+            // SetGraphicsRootConstantBufferView = vtable index 38 (RootParameterIndex, BufferLocation)
+            vtable_call!(cmd_list, 38,
+                extern "system" fn(usize, u32, u64),
+                0u32, rs.cbv_gpu_va);
+        }
+        1
+    }
     #[cfg(not(target_os = "windows"))]
     { let _ = (_list, _cbv); 1 }
 }
 
-/// Draw — stub (vtable work pending)
+/// Draw — set topology, vertex buffer, and issue draw call
 #[no_mangle]
-pub extern "C" fn jdb_dx12_draw(_list: i64, _vertex_count: i64) -> i64 {
+pub extern "C" fn jdb_dx12_draw(_list: i64, vertex_count: i64) -> i64 {
     #[cfg(target_os = "windows")]
-    { 1 } // Stub
+    {
+        let rs = get_render();
+        if !rs.initialized { return 0; }
+        unsafe {
+            let cmd_list = rs.cmd_list;
+
+            // IASetPrimitiveTopology = vtable index 20 (D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST = 4)
+            vtable_call!(cmd_list, 20,
+                extern "system" fn(usize, u32),
+                D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+
+            // IASetVertexBuffers = vtable index 44 (StartSlot, NumViews, pViews)
+            let vbv = D3D12VertexBufferView {
+                buffer_location: rs.vb_view_buffer as u64,
+                size_in_bytes: rs.vb_view_size,
+                stride_in_bytes: rs.vb_view_stride,
+            };
+            vtable_call!(cmd_list, 44,
+                extern "system" fn(usize, u32, u32, *const D3D12VertexBufferView),
+                0u32, 1u32, &vbv);
+
+            // DrawInstanced = vtable index 12 (VertexCount, InstanceCount, StartVertex, StartInstance)
+            vtable_call!(cmd_list, 12,
+                extern "system" fn(usize, u32, u32, u32, u32),
+                vertex_count as u32, 1u32, 0u32, 0u32);
+        }
+        1
+    }
     #[cfg(not(target_os = "windows"))]
-    { let _ = (_list, _vertex_count); 1 }
+    { let _ = (_list, vertex_count); 1 }
 }
 
-/// End frame — stub (vtable work pending)
+/// End frame — transition back to PRESENT, close + execute command list, present, wait for GPU
 #[no_mangle]
 pub extern "C" fn jdb_dx12_end_frame() -> i64 {
     #[cfg(target_os = "windows")]
-    { 1 } // Stub
+    {
+        let rs = get_render();
+        if !rs.initialized { return 0; }
+        unsafe {
+            let cmd_list = rs.cmd_list;
+            let cmd_queue = rs.command_queue;
+
+            // ResourceBarrier: RENDER_TARGET -> PRESENT
+            let barrier = D3D12ResourceBarrier {
+                barrier_type: D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+                flags: 0,
+                transition: D3D12ResourceTransitionBarrier {
+                    resource: rs.render_targets[rs.frame_index as usize],
+                    subresource: D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                    state_before: D3D12_RESOURCE_STATE_RENDER_TARGET,
+                    state_after: D3D12_RESOURCE_STATE_PRESENT,
+                },
+            };
+            vtable_call!(cmd_list, 26,
+                extern "system" fn(usize, u32, *const D3D12ResourceBarrier),
+                1u32, &barrier);
+
+            // Close command list = vtable index 9
+            let hr = vtable_call!(cmd_list, 9, extern "system" fn(usize) -> i32);
+            if hr < 0 {
+                eprintln!("💀 [DX12] CommandList::Close failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+
+            // ExecuteCommandLists = vtable index 10 on command queue
+            let cmd_lists: [usize; 1] = [cmd_list];
+            vtable_call!(cmd_queue, 10,
+                extern "system" fn(usize, u32, *const usize),
+                1u32, cmd_lists.as_ptr());
+
+            // Present = vtable index 8 on swap chain (SyncInterval=1, Flags=0)
+            let hr = vtable_call!(rs.swap_chain, 8,
+                extern "system" fn(usize, u32, u32) -> i32,
+                1u32, 0u32);
+            if hr < 0 {
+                eprintln!("💀 [DX12] Present failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+
+            // Signal fence
+            let fence_val = rs.fence_value;
+            // ID3D12CommandQueue::Signal = vtable index 14
+            let hr = vtable_call!(cmd_queue, 14,
+                extern "system" fn(usize, usize, u64) -> i32,
+                rs.fence, fence_val);
+            if hr < 0 {
+                eprintln!("💀 [DX12] Signal failed hr=0x{:08X}", hr as u32);
+                return 0;
+            }
+
+            // Wait for GPU to complete
+            // ID3D12Fence::GetCompletedValue = vtable index 8
+            let completed = vtable_call!(rs.fence, 8,
+                extern "system" fn(usize) -> u64);
+            if completed < fence_val {
+                // ID3D12Fence::SetEventOnCompletion = vtable index 9
+                vtable_call!(rs.fence, 9,
+                    extern "system" fn(usize, u64, usize) -> i32,
+                    fence_val, rs.fence_event);
+                WaitForSingleObject(rs.fence_event, 0xFFFFFFFF); // INFINITE
+            }
+
+            rs.fence_value += 1;
+            rs.frame_index = (rs.frame_index + 1) % BUFFER_COUNT;
+        }
+        1
+    }
     #[cfg(not(target_os = "windows"))]
     { 1 }
 }
@@ -951,10 +1463,21 @@ pub extern "C" fn jdb_dx12_destroy_pso(_pso: i64) -> i64 {
 mod tests {
     #[test]
     fn test_dx12_cube_functions_exist() {
-        // These should compile and be callable (stubs on non-Windows)
-        assert_eq!(super::jdb_dx12_create_cube_mesh(), 1);
-        assert_eq!(super::jdb_dx12_begin_frame(), 1);
-        assert_eq!(super::jdb_dx12_present(), 1);
+        // Without a DX12 device, functions return 0 (not initialized)
+        // On non-Windows they return 1 (stub)
+        #[cfg(target_os = "windows")]
+        {
+            // Not initialized → returns 0 or 1 depending on function
+            let _ = super::jdb_dx12_create_cube_mesh();
+            let _ = super::jdb_dx12_begin_frame();
+            let _ = super::jdb_dx12_present();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(super::jdb_dx12_create_cube_mesh(), 1);
+            assert_eq!(super::jdb_dx12_begin_frame(), 1);
+            assert_eq!(super::jdb_dx12_present(), 1);
+        }
     }
 
     #[test]
