@@ -51,11 +51,12 @@ impl IRType {
 #[derive(Debug)]
 pub struct IRModule {
     pub name: String,
+    pub functions: Vec<IRFunction>,
 }
 
 impl IRModule {
     pub fn new(name: &str) -> Self {
-        Self { name: name.to_string() }
+        Self { name: name.to_string(), functions: Vec::new() }
     }
 }
 
@@ -196,6 +197,30 @@ pub enum IRInstruction {
     VkDispatch { shader: String, x: Box<IRInstruction>, y: Box<IRInstruction>, z: Box<IRInstruction> }, // vkCmdDispatch
     VkBufferFree { ptr: String },                       // vkFreeMemory + vkDestroyBuffer
     VkDestroy,                                          // vkDestroyDevice + vkDestroyInstance
+
+    // --- GC Plus 💀☕ Exclusive Instructions (JaDead-BIB v1.0) ---
+    // Módulo 1: Scope Tracker
+    GCPlusScopeEnter { scope_id: u32 },
+    GCPlusScopeExit { scope_id: u32 },
+    
+    // Módulo 2: Loop Anticipator
+    GCPlusLoopAlloc { type_id: u32, pool_size: usize },
+    GCPlusLoopReuse { pool_ptr: String },
+    GCPlusLoopFree { pool_ptr: String },
+
+    // Módulo 3: Escape Detector
+    GCPlusEscapeCheck { ptr: String, bounds: (usize, usize) },
+    GCPlusEscapeKill { ptr: String },
+
+    // Módulo 4: Region Memory
+    GCPlusRegionCreate { region_id: u32, size: usize },
+    GCPlusRegionAlloc { region_id: u32 },
+    GCPlusRegionFree { region_id: u32 },
+
+    // Módulo 5: Cycle Breaker
+    GCPlusCycleDetect { type_a: String, type_b: String },
+    GCPlusCycleBreak { ptr: String },
+    GCPlusWeakRef { ptr: String },
 
     // No-op
     Nop,

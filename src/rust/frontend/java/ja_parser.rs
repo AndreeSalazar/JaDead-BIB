@@ -536,9 +536,15 @@ impl JaParser {
             Some(JaToken::Identifier(_)) => {
                 let name = self.parse_identifier()?;
                 if self.match_token(&JaToken::LParen) {
-                    // Implicit method call: atacar()
+                    let mut args = Vec::new();
+                    if !self.check(&JaToken::RParen) {
+                        args.push(self.parse_expr()?);
+                        while self.match_token(&JaToken::Comma) {
+                            args.push(self.parse_expr()?);
+                        }
+                    }
                     self.consume(&JaToken::RParen, "end of implicit method args")?;
-                    JaExpr::MethodCall { target: None, name, type_args: vec![], args: vec![] }
+                    JaExpr::MethodCall { target: None, name, type_args: vec![], args }
                 } else {
                     JaExpr::Name(name)
                 }
@@ -550,8 +556,15 @@ impl JaParser {
         while self.match_token(&JaToken::Dot) {
             let field_or_method = self.parse_identifier()?;
             if self.match_token(&JaToken::LParen) {
+                let mut args = Vec::new();
+                if !self.check(&JaToken::RParen) {
+                    args.push(self.parse_expr()?);
+                    while self.match_token(&JaToken::Comma) {
+                        args.push(self.parse_expr()?);
+                    }
+                }
                 self.consume(&JaToken::RParen, "end of method args")?;
-                expr = JaExpr::MethodCall { target: Some(Box::new(expr)), name: field_or_method, type_args: vec![], args: vec![] };
+                expr = JaExpr::MethodCall { target: Some(Box::new(expr)), name: field_or_method, type_args: vec![], args };
             } else {
                 expr = JaExpr::FieldAccess { target: Box::new(expr), field: field_or_method };
             }

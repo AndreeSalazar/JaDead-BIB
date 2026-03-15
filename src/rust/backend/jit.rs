@@ -18,7 +18,9 @@ use std::ptr;
 
 /// Cache de código de máquina compilado en la misma sesión
 struct CacheEntry {
+    #[allow(dead_code)]
     text: Vec<u8>,
+    #[allow(dead_code)]
     data: Vec<u8>,
 }
 
@@ -33,6 +35,14 @@ pub fn hash_source(source: &str) -> u64 {
         h = h.wrapping_mul(0x100000001b3); // FNV prime
     }
     h
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_print_str(ptr: *const u8, len: u32) {
+    let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+    if let Ok(s) = std::str::from_utf8(slice) {
+        println!("{}", s);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -67,21 +77,21 @@ impl JitExecutor {
             let ebx_feat1: u32;
             let ebx_feat7: u32;
             unsafe {
-                let mut eax_out: u32;
+                let mut _eax_out: u32;
                 let mut ebx_out: u32;
-                let mut ecx_out: u32;
-                let mut edx_out: u32;
+                let mut _ecx_out: u32;
+                let mut _edx_out: u32;
                 std::arch::asm!(
                     "push rbx",
                     "cpuid",
                     "mov {ebx_out:e}, ebx",
                     "pop rbx",
-                    inout("eax") 1u32 => eax_out,
+                    inout("eax") 1u32 => _eax_out,
                     ebx_out = out(reg) ebx_out,
-                    out("ecx") ecx_out,
-                    out("edx") edx_out,
+                    out("ecx") _ecx_out,
+                    out("edx") _edx_out,
                 );
-                has_sse42 = (ecx_out & (1 << 20)) != 0;
+                has_sse42 = (_ecx_out & (1 << 20)) != 0;
                 ebx_feat1 = ebx_out;
 
                 std::arch::asm!(
@@ -89,10 +99,10 @@ impl JitExecutor {
                     "cpuid",
                     "mov {ebx_out:e}, ebx",
                     "pop rbx",
-                    inout("eax") 7u32 => eax_out,
+                    inout("eax") 7u32 => _eax_out,
                     ebx_out = out(reg) ebx_out,
-                    inout("ecx") 0u32 => ecx_out,
-                    out("edx") edx_out,
+                    inout("ecx") 0u32 => _ecx_out,
+                    out("edx") _edx_out,
                 );
                 has_avx2 = (ebx_out & (1 << 5)) != 0;
                 ebx_feat7 = ebx_out;
@@ -139,7 +149,7 @@ impl JitExecutor {
     /// Executable Memory Engine (Windows Implementations)
     #[cfg(target_os = "windows")]
     pub fn execute_with_stats(&self) -> Result<(i32, JitStats), String> {
-        let cpu = Self::detect_cpu_features();
+        let _cpu = Self::detect_cpu_features();
         // THERMAL CACHE LOOKUP
         if let Ok(mut cache) = THERMAL_CACHE.lock() {
             if cache.contains_key(&self.source_hash) {
@@ -193,10 +203,10 @@ impl JitExecutor {
         let patch_ms = patch_start.elapsed().as_secs_f64() * 1000.0;
 
         let exec_start = std::time::Instant::now();
-        let func: extern "C" fn() -> i32 = unsafe { std::mem::transmute(text_ptr) };
+        let _func: extern "C" fn() -> i32 = unsafe { std::mem::transmute(text_ptr) };
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            // func(); 
+            _func(); 
             0
         }));
         let exec_ms = exec_start.elapsed().as_secs_f64() * 1000.0;

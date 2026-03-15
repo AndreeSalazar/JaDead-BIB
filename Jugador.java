@@ -8,6 +8,7 @@ public class Jugador {
     }
     
     public int atacar() {
+        System.out.println("Hello from FastOS Native RAM!");
         return 10;
     }
 }

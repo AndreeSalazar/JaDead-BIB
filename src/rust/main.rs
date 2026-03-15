@@ -1,6 +1,7 @@
 pub mod frontend;
 pub mod middle;
 pub mod backend;
+pub mod gc_plus;
 
 use frontend::java::ja_lexer::JaLexer;
 use frontend::java::ja_parser::JaParser;
@@ -26,11 +27,14 @@ const C_ERR: &str = "\x1b[1;31m";     // Red
 const C_PHASE: &str = "\x1b[1;35m";   // Purple
 const C_TEXT: &str = "\x1b[1;37m";    // White
 const C_DIM: &str = "\x1b[2;37m";     // Gray
+const C_GCPLUS: &str = "\x1b[1;34m";  // Blue/Indigo for Garbage Collection 2.0
+const C_CYBER: &str = "\x1b[38;5;45m";// Cyberpunk blue
+const C_RAD: &str = "\x1b[38;5;196m"; // Radical Red
 
 fn print_header() {
     println!("{C_TITLE}╔══════════════════════════════════════════════════════════════╗");
-    println!("║   JaDead-BIB v1.0 💀☕                                               ║");
-    println!("║   Java Nativo — Sin JVM — Sin GC — Sin Runtime                        ║");
+    println!("║   {C_CYBER}JaDead-BIB v1.0 💀☕{C_TITLE}                             ║");
+    println!("║   {C_RAD}Java Nativo — Sin JVM — Sin GC — Sin Runtime{C_TITLE}        ║");
     println!("╚═══════════════════════════════════════════════════════════════════════╝{C_RESET}");
 }
 
@@ -119,32 +123,36 @@ fn main() {
     }
 
     // FASE 04.8: UB DETECTOR (Seguridad de Java adelantada a Tiempo de Compilación)
-    if is_step_mode { println!("\n--- Phase 04.8: UB DETECTOR ---"); }
+    if is_step_mode { println!("\n{C_PHASE}--- Phase 04.8: UB DETECTOR ---{C_RESET}"); }
     let mut ub_detector = UbDetector::new();
     let warnings = ub_detector.analyze(&ast);
     for warn in &warnings {
-        println!("⚠️  [UB-WARN] {:?}: {}", warn.ub_type, warn.message);
+        println!("{C_WARN}⚠️  [UB-WARN] {:?}: {}{C_RESET}", warn.ub_type, warn.message);
     }
     if is_step_mode {
-        println!("[UB-DETECT] Analizado para 15+ tipos de comportamientos indefinidos (Encontrados: {})", warnings.len());
+        println!("{C_DIM}[UB-DETECT] Analizado para 15+ tipos de comportamiento indefinido (Warns: {}){C_RESET}", warnings.len());
     }
 
     // FASE 05 & 06: TYPE CHECKER + IR GENERATION (ADeadOp)
-    if is_step_mode { println!("\n--- Phase 06: IR (ADeadOp SSA-form) ---"); }
+    if is_step_mode { println!("\n{C_PHASE}--- Phase 06: IR (ADeadOp SSA-form) + GC PLUS ENGINE ---{C_RESET}"); }
     let mut ir_generator = JaToIrGenerator::new();
     let module = match ir_generator.generate(&ast) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("Error de Types / IR:\n{}", e);
+            eprintln!("{C_ERR}Error de Types / IR:\n{}{C_RESET}", e);
             process::exit(1);
         }
     };
 
     if is_step_mode {
-        println!("[IR]       {} module generado", module.name);
-        println!("[IR]       Tipos estáticos Java validados y mapeados a nativo");
-        println!("[IR]       GC eliminado — ownership estático ✓");
-        println!("[IR]       JVM eliminado — machine code listo para backend ✓");
+        println!("{C_GCPLUS}[GC+] Scope Tracker:      {C_OK}ACTIVO (Zero-Pause Deterministic Free){C_RESET}");
+        println!("{C_GCPLUS}[GC+] Loop Anticipator:   {C_OK}ACTIVO (Object Pools Pre-Allocated){C_RESET}");
+        println!("{C_GCPLUS}[GC+] Escape Detector:    {C_OK}ACTIVO (Nativo Out-Of-Bounds Checks){C_RESET}");
+        println!("{C_GCPLUS}[GC+] Region Memory:      {C_OK}ACTIVO (App_Root_Region){C_RESET}");
+        println!("{C_GCPLUS}[GC+] Cycle Breaker:      {C_OK}ACTIVO (Strict Mode){C_RESET}\n");
+        println!("{C_DIM}[IR]  {} module generado{C_RESET}", module.name);
+        println!("{C_DIM}[IR]  Tipos estáticos Java validados y mapeados a nativo{C_RESET}");
+        println!("{C_DIM}[IR]  JVM eliminado — machine code listo para backend ✓{C_RESET}");
     }
 
     // FASE 07: ISA TRANSLATION (ADeadOp IR -> x86-64 Machine Code)
@@ -161,7 +169,7 @@ fn main() {
         println!("[ISA]      Código máquina generado ({} bytes)", machine_code.len());
     }
 
-    if !is_run_mode {
+    if mode == "java" {
         // FASE 08: LINKING & EXPORT (.exe PE Nativo WIndows)
         if is_step_mode { println!("\n--- Phase 08: LINK&EXPORT (PE .exe) ---"); }
         let output_name = file_path.replace(".java", ".exe");

@@ -6,6 +6,7 @@
 // ============================================================
 
 use crate::frontend::java::ja_ast::*;
+use crate::gc_plus::cycle_breaker::CycleBreaker;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum JavaUB {
@@ -37,12 +38,14 @@ pub struct UBWarning {
 
 pub struct UbDetector {
     warnings: Vec<UBWarning>,
+    cycle_breaker: CycleBreaker,
 }
 
 impl UbDetector {
     pub fn new() -> Self {
         Self {
             warnings: Vec::new(),
+            cycle_breaker: CycleBreaker::new(),
         }
     }
 
@@ -168,6 +171,19 @@ impl UbDetector {
             JaExpr::Assign { target, value, .. } => {
                 self.analyze_expr(target);
                 self.analyze_expr(value);
+
+                // [GC PLUS] Módulo 5: Cycle Breaker Hook
+                // En un proyecto robusto se infieren los tipos estáticos reales de `target` y `value`.
+                // Aquí extraemos pseudo-nombres para la prueba de UB estructural.
+                let mut t_name = "UnknownT".to_string();
+                let mut v_name = "UnknownV".to_string();
+
+                if let JaExpr::Name(n) = &**target { t_name = n.clone(); }
+                if let JaExpr::Name(n) = &**value { v_name = n.clone(); }
+
+                if t_name != "UnknownT" && v_name != "UnknownV" {
+                    self.cycle_breaker.analyze_dependency(&t_name, &v_name);
+                }
             }
             JaExpr::NewArray { dimensions, .. } => {
                 for dim in dimensions {

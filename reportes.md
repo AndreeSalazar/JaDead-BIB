@@ -1,75 +1,60 @@
-# 💀☕🦈 JaDead-BIB — Roadmap de APIs y Mejoras Especiales
+# 🗺️ JaDead-BIB: The Ultimate Native Standard API Mapping
 
-Este documento es el reporte maestro de **Ideas de API y Mejoras Generales** para inyectar al ecosistema de `JaDead-BIB`. El objetivo es mapear el confort de *Java Estándar* a nuestras APIs de alto rendimiento (`FastOS.bib`), y añadir utilidades exclusivas que la JVM estándar jamás podría tener.
+Para que **JaDead-BIB** pueda compilar el código fuente en Java (*J2SE 21+*) directamente a nuestro FastOS.bib o x86-64 Nativo (sin JVM y sin basura), necesitamos que el `ImportResolver` intercepte los paquetes estándar de `java.*` y los mapé internamente a nuestra librería de super-rendimiento.
 
-## 1. Traducciones Esenciales de Java API → FastOS.bib Nativo
-*Mapeos transparentes (se escriben en Java, el compilador los transforma).*
-
-### 1.1 Colecciones (Zero-Overhead)
-- [ ] `java.util.ArrayList<T>` -> `deadbib.col.FastArray<T>` (Memoria secuencial pura, sin boxing).
-- [ ] `java.util.HashMap<K,V>` -> `deadbib.col.ThermalMap<K,V>` (SIMD basado en paralelismo y Hashes super rápidos de PyDead-BIB).
-- [ ] `java.util.LinkedList<T>` -> Lanzar warning u ofrecer optimizar automáticamente a `ArrayList`. (Exigencia de la filosofía Dead-BIB para cache misses).
-
-### 1.2 Entrada y Salida (File System Directo)
-- [ ] `java.io.File` / `java.nio.file.Path` -> Llamadas Win32 / POSIX `CreateFileA` puras. 
-- [ ] Módulo nativo adicional `FastFile.readAllLines()` sin requerir instanciar `BufferedReader` / `FileReader` ni atrapar decenas de excepciones `IOException`.
-
-### 1.3 Multithreading (Green Threads Nativos)
-- [ ] `java.lang.Thread` -> Traducir a `std::thread` de Rust o wrappers a `CreateThread` (OS base).
-- [ ] Soporte "Virtual Threads" (`Thread.startVirtualThread`) -> Transformar en Corrutinas sin pila en Ensamblador (Extremadamente más rápido que la solución híbrida actual de Java 21).
+Este documento es el **Reporte y Roadmap** de los componentes más drásticos de la API oficial que reconstruiremos en Rust.
 
 ---
 
-## 2. DX (Developer Experience) y Sintaxis Exclusiva JaDead-BIB
-*Funcionalidad extra que facilitará la vida de los programadores de Java.*
+## 1. ⚙️ `java.lang` (Core Internals)
 
-### 2.1 Interpolación de Strings "Py-Style" en Java
-- Java bloquea la interpolación dinámica nativa (recientemente añadió `STR`); JaDead-BIB puede interceptar en el Lexer y permitir:
-  ```java
-  String arma = "M4A1";
-  System.out.println(f"El jugador recogió una {arma}"); // <- Exclusivo JaDead.
-  ```
+### `java.lang.System`
+- **`System.out.println(String)`** -> Mapeado directamente a `[ADeadOp::PrintStr]`.
+- **`System.currentTimeMillis()`** -> Mapeado directamente a llamadas al SO (Win32 `GetSystemTimeAsFileTime` / Linux `gettimeofday`).
+- **`System.gc()`** -> **[OBSOLETO/INTERCEPTADO]**. En JaDead-BIB, `System.gc()` no hará nada o emitirá un warning. La memoria ya está manejada por la arquitectura **GC Plus** determinista descrita en la *Fase 3*, liberándose microscópicamente por regiones o por final de scopes (Zero-Pause).
 
-### 2.2 Constructores Inferidos Modernos
-- Evitar verbosidad en estructuras de datos simples no record:
-  ```java
-  Point p = new (10, 20); // El compilador infiere `Point` desde el lado izquierdo.
-  ```
-
-### 2.3 Manejo de Errores como Valores (estilo Rust -> Java)
-- En lugar de ensuciar con `try-catch` masivos por un simple error, inyectar el patrón `Result` en APIs problemáticas si el usuario lo desea.
-  ```java
-  @deadbib:safe
-  Result<String, IOError> content = FastFile.read("Config.txt");
-  if(content.isOk()) { ... }
-  ```
+### `java.lang.String`
+- Rediseñado en backend como un arreglo inmutable de bytes ASCII/UTF-8 o C-Strings terminados en null (`\0`), sin el altísimo overhead del object header de Java.
 
 ---
 
-## 3. Optimizaciones Críticas (Backend JIT 2.0 / ADeadOp)
+## 2. 🧮 `java.lang.Math` (SIMD Accelerated)
 
-### 3.1 Detección de Fugas sin GC (Ownership Automático)
-A diferencia de C/C++, Java asume basura infinita. JaDead-BIB:
-- [ ] **Inject Free() en EOF**: Análisis de escape mediante el AST para deducir cuándo un bloque finaliza e incorporar instrucciones Free automáticamente al IR ADeadOp.
+Queremos que JaDead-BIB sea un compilador feroz en Videojuegos y Simulaciones Físicas. La API Math tradicional de Java está limitada. En JaDead-BIB usaremos **SIMD (AVX2)** nativo para operaciones vectorizadas usando la extensión `@deadbib:simd`:
 
-### 3.2 Vectorización Automática (SIMD Loops)
-- [ ] Implementar un optimizador en el Pipeline para detectar este loop de Java:
-  ```java
-  for(int i = 0; i < array.length; i++) array[i] = a[i] + b[i];
-  ```
-  y forzarlo en el `jit.rs` a usar las instrucciones vectorizadas `VPADDD` del CPU detectado (AVX2).
-
-### 3.3 Extensión GPGPU (CUDA / OpenCL transpile)
-- [ ] Identificador de bloque `@deadbib:gpu`. Transformar un loop de Java en un kernel `.ptx` e inyectarlo dinámicamente usando la API del Driver de Nvidia sin salir de Java.
-  ```java
-  @deadbib:gpu
-  public void processImage(float[] pixels) { ... }
-  ```
+- **`Math.sqrt(double)`** -> Map a `VSQRTSD` nativo O(1) vía instrucción en hardware.
+- **`Math.sin(double)`** -> Map a instrucción de coprocesador acelerado (`FSIN` o similar algorítmico rápido).
+- **`Math.abs(double)`** -> Quita el bit de signo mediante máscaras bit a bit (AND mask).
+- **Aceleración Futura (Vector API)** -> En vez de cálculos paralelos densos, soportaríamos algo como `FloatVector` mapeado a `YMM` Registros (256-bit AVX2) que resuelve 8 `float`s al mismo tiempo en 1 ciclo de CPU. 
 
 ---
 
-## 4. Mejoras del Command Line `jab`
-- [ ] Bandera `jab run Jugador.java --watch` que se reinicie automáticamente ante cambios guardados. Como la compilación y ejecución toman `0.38ms`, el HMR (Hot Module Replacement) será literal y absurdamente asombroso para la comunidad de Java.
-- [ ] Bandera `jab env` para imprimir estadísticas completas de Hardware, versión del LLVM/Backend e integración con FastOS.
+## 3. 📂 `java.io` y `java.nio` (FastOS I/O)
 
-*Este documento permanecerá vivo para ir recolectando nuevas armas para la expansión de JaDead-BIB.*
+La I/O genérica de la JVM pasa por múltiples abstracciones virtuales.
+
+- **`java.io.File` / `java.nio.file.Files`** -> Mapeados directamente a las Syscalls de Windows (`CreateFileW`, `ReadFile`) Linux (`open`, `read`, `mmap`).
+- Los flujos grandes de datos (ej. lectura de texturas 4K) pueden mapearse a Memory-Mapped Files nativos, saltando buffers intermedios de Java.
+
+---
+
+## 4. 🔀 `java.lang.Thread` (OS Green Threads & OS Threads)
+
+A diferencia de la JVM o Project Loom (Virtual Threads), implementaremos un generador interno híbrido de corrutinas estáticas para paralelizar código. Se interceptan clases como `Thread` y las interfaces de concurrencia:
+
+- En Windows: mapeo directo a `CreateThread` o Thread Pools subyacentes del OS.
+- Sin recolección de basura, los Hilos en JaDead-BIB no provocan "Stop-The-World" Pauses cruzados.
+- Exclusión Estricta Mutua (Mutex) mapeada a `SRWLock` en Windows (ultra rápido).
+
+---
+
+## 5. 💀 Exclusivas de JaDead-BIB (Nuevas APIs / Directivas AST)
+
+El compilador ahora detecta Comportamientos Indefinidos en Fase 4.8. Para usar el máximo poder, ofreceremos Anotaciones de Control Exclusivas (inspiradas del *UB Detector* y *GC Plus*).
+
+- `@deadbib:region("GameLevel1")`: Define manualmente el Memory Region (Módulo 4) en una clase.
+- `@deadbib:gpu`: Al marcar un método `public static void procesarFisicas()`, el backend `ISATranslator` intercepta y empaqueta el contenido en un kernel SPIR-V/CUDA ejecutándose directamente en la Tarjeta Gráfica en `jab run`.
+- `@deadbib:pure`: Fuerza al compilador a aislar estáticamente que el método no toca ninguna variable global, permitiendo a ADeadOp elidir comprobaciones de cache o mutabilidad de memoria cruzada completamente.
+
+---
+**Estado Oficial**: Proyecto compilador en *Release Readiness* inicial. Fase "Garbage Collection 2.0" superada en código nativo (Scope, Loop, Bounds, Regions, Cycles OK). Preparación completada para el primer parche Beta a Desarrolladores de Videojuegos y FastOS.

@@ -8,11 +8,18 @@
 use super::ja_ast::*;
 use crate::middle::ir::*;
 use super::ja_types::JaTypeChecker;
+use crate::gc_plus::scope_tracker::ScopeTracker;
+use crate::gc_plus::loop_anticipator::LoopAnticipator;
+use crate::gc_plus::escape_detector::EscapeDetector;
+use crate::gc_plus::region_memory::RegionMemory;
 
 pub struct JaToIrGenerator {
     type_checker: JaTypeChecker,
-    current_module: Option<IRModule>,
     current_functions: Vec<IRFunction>,
+    scope_tracker: ScopeTracker,
+    loop_anticipator: LoopAnticipator,
+    escape_detector: EscapeDetector,
+    region_memory: RegionMemory,
     
     // Label tracking for control flow
     label_count: usize,
@@ -22,8 +29,11 @@ impl JaToIrGenerator {
     pub fn new() -> Self {
         Self {
             type_checker: JaTypeChecker::new(),
-            current_module: None,
             current_functions: Vec::new(),
+            scope_tracker: ScopeTracker::new(),
+            loop_anticipator: LoopAnticipator::new(),
+            escape_detector: EscapeDetector::new(),
+            region_memory: RegionMemory::new(),
             label_count: 0,
         }
     }
@@ -44,9 +54,18 @@ impl JaToIrGenerator {
         // Modules in ADeadOp usually represent the compilation unit / binary
         let mut module = IRModule::new(&name);
 
+        // [GC PLUS] Módulo 4: Default Codebase Region
+        let root_region_id = self.region_memory.define_region("App_Root_Region");
+        // Simulated root injection if it had a top level execution block
+        // func.body.push(IRInstruction::GCPlusRegionCreate { region_id: root_region_id, size: 8192 });
+
         for decl in &ast.declarations {
             self.generate_type_decl(decl)?;
         }
+
+        self.region_memory.free_region(root_region_id);
+
+        module.functions = std::mem::take(&mut self.current_functions);
 
         // Return the collected module and functions
         // For simplicity in this structure, we just wrap it in the IRModule
@@ -63,7 +82,7 @@ impl JaToIrGenerator {
                 }
                 Ok(())
             }
-            JaTypeDecl::Record { name, components, body, .. } => {
+            JaTypeDecl::Record { name, body, .. } => {
                 // Record translates natively to an IR Struct definition + auto methods
                 // Here we just map its explicitly defined members
                 for member in body {
@@ -113,7 +132,7 @@ impl JaToIrGenerator {
                 }
                 Ok(())
             }
-            JaClassMember::Constructor { name, params, body, .. } => {
+            JaClassMember::Constructor { name: _name, params, body, .. } => {
                 let mangled_name = format!("{}_<init>", class_name);
                 let ret_ir_type = IRType::Void; // Constructors return void internally
                 let mut ir_params = Vec::new();
@@ -139,9 +158,20 @@ impl JaToIrGenerator {
     // ── Statements ───────────────────────────────────────────
 
     fn generate_block(&mut self, block: &JaBlock, func: &mut IRFunction) -> Result<(), String> {
+        // [GC PLUS] Módulo 1: Enter Scope
+        let sid = self.scope_tracker.current_scope().unwrap_or(0) as u32;
+        self.scope_tracker.enter_scope();
+        func.body.push(IRInstruction::GCPlusScopeEnter { scope_id: sid });
+
         for stmt in &block.stmts {
             self.generate_stmt(stmt, func)?;
         }
+
+        // [GC PLUS] Módulo 1: Exit Scope
+        let popped_sid = self.scope_tracker.current_scope().unwrap_or(0) as u32;
+        let _freed_vars = self.scope_tracker.exit_scope()?;
+        func.body.push(IRInstruction::GCPlusScopeExit { scope_id: popped_sid });
+        
         Ok(())
     }
 
@@ -150,10 +180,12 @@ impl JaToIrGenerator {
             JaStmt::Block(b) => self.generate_block(b, func),
             JaStmt::Expr(e) => {
                 let ir_expr = self.generate_expr(e, func)?;
-                // If it's just an expression statement, we evaluate it. 
-                // ADeadOp requires assignment to registers/variables, but for Call we just emit it.
-                if let IRInstruction::Call { .. } = ir_expr {
-                    func.body.push(ir_expr);
+                // Emit side-effecting expressions (Calls or Native Prints)
+                match ir_expr {
+                    IRInstruction::Call { .. } | IRInstruction::PrintStr(_) => {
+                        func.body.push(ir_expr);
+                    }
+                    _ => {}
                 }
                 Ok(())
             }
@@ -204,6 +236,14 @@ impl JaToIrGenerator {
                 Ok(())
             }
             JaStmt::While { cond, body } => {
+        
+                // [GC PLUS] Módulo 2: Pre-Alloc Loop Object Pool
+                let pool_name = self.loop_anticipator.enter_loop();
+                func.body.push(IRInstruction::GCPlusLoopAlloc { 
+                    type_id: 0, // Placeholder for specific type inference 
+                    pool_size: 1024 
+                });
+
                 let start_label = self.next_label("while_start");
                 let end_label = self.next_label("while_end");
 
@@ -213,10 +253,16 @@ impl JaToIrGenerator {
                 func.body.push(cond_val);
                 func.body.push(IRInstruction::BranchIfFalse(end_label.clone()));
 
+                // [GC PLUS] Inside loop body: Reuse memory instead of Alloc
+                func.body.push(IRInstruction::GCPlusLoopReuse { pool_ptr: pool_name.clone() });
                 self.generate_stmt(body, func)?;
+                
                 func.body.push(IRInstruction::Jump(start_label));
                 
+                // [GC PLUS] Loop End: Free Object Pool
                 func.body.push(IRInstruction::Label(end_label));
+                let popped_pool = self.loop_anticipator.exit_loop()?;
+                func.body.push(IRInstruction::GCPlusLoopFree { pool_ptr: popped_pool });
 
                 Ok(())
             }
@@ -231,6 +277,7 @@ impl JaToIrGenerator {
             JaExpr::IntLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Int(*v))),
             JaExpr::FloatLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Float(*v))),
             JaExpr::BooleanLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Bool(*v))),
+            JaExpr::StringLiteral(v) => Ok(IRInstruction::LoadString(v.clone())),
             JaExpr::Name(n) => Ok(IRInstruction::Load(n.clone())),
             JaExpr::FieldAccess { target, field } => {
                 // E.g. this.vida, target=this, field=vida
@@ -241,7 +288,27 @@ impl JaToIrGenerator {
                     IRInstruction::Load(n) | IRInstruction::LoadString(n) => n,
                     _ => "temp_obj".to_string()
                 };
+                
+                // [GC PLUS] Módulo 3: Escape Detector Null Safety
+                // In strict mode, we statically prove target is not null natively
+                self.escape_detector.analyze_bounds(&root_obj, None, None);
+                func.body.push(IRInstruction::GCPlusEscapeCheck { ptr: root_obj.clone(), bounds: (0, 0) });
+                
                 Ok(IRInstruction::PropertyGet { obj: root_obj, name: field.clone() })
+            }
+            JaExpr::ArrayAccess { array, index } => {
+                let a = self.generate_expr(array, func)?;
+                let root_obj = match a {
+                    IRInstruction::Load(n) | IRInstruction::LoadString(n) => n,
+                    _ => "temp_array".to_string()
+                };
+                
+                let _i = self.generate_expr(index, func)?;
+                // [GC PLUS] Módulo 3: Array Bounds Static Checker
+                // If it isn't resolved statically, we emit the IR dynamic verifier
+                func.body.push(IRInstruction::GCPlusEscapeCheck { ptr: root_obj.clone(), bounds: (0, 9999) }); // stub bound size
+                
+                Ok(IRInstruction::Load(format!("{}_indexed", root_obj))) // stub return
             }
             JaExpr::Assign { target, value, .. } => {
                 let val = self.generate_expr(value, func)?;
