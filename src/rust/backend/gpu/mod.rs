@@ -6,6 +6,8 @@ pub mod vulkan;
 pub mod dx12;
 #[allow(static_mut_refs)]
 pub mod cuda;
+#[allow(static_mut_refs)]
+pub mod window;
 
 // ── GPU Auto-detect ─────────────────────────────────────────
 
