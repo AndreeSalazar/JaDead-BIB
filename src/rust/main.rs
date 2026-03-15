@@ -129,7 +129,7 @@ fn main() {
     let mut ub_detector = UbDetector::new();
     let warnings = ub_detector.analyze(&ast);
     for warn in &warnings {
-        s_print!("{C_WARN}⚠️  [UB-WARN] {:?}: {}{C_RESET}", warn.ub_type, warn.message);
+        s_print!("{C_WARN}⚠️  [UB-WARN] {:?}: {}{C_RESET}", warn.kind, warn.message);
     }
     s_print!("{C_DIM}[UB-DETECT] Analizado para 15+ tipos de comportamiento indefinido (Warns: {}){C_RESET}", warnings.len());
 

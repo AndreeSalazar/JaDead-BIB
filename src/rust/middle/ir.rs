@@ -343,3 +343,221 @@ pub fn optimize_function(func: &mut IRFunction) -> (usize, usize) {
     let eliminated = optimize_dead_code_elimination(func);
     (folded, eliminated)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_func(body: Vec<IRInstruction>) -> IRFunction {
+        IRFunction {
+            name: "test".to_string(),
+            params: vec![],
+            return_type: IRType::I64,
+            body,
+        }
+    }
+
+    #[test]
+    fn test_constant_folding_add() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Add,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(3))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(4))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 1);
+        assert!(matches!(&func.body[0], IRInstruction::LoadConst(IRConstValue::Int(7))));
+    }
+
+    #[test]
+    fn test_constant_folding_mul() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Mul,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(6))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(7))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 1);
+        assert!(matches!(&func.body[0], IRInstruction::LoadConst(IRConstValue::Int(42))));
+    }
+
+    #[test]
+    fn test_constant_folding_div_safe() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Div,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(10))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(3))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 1);
+        assert!(matches!(&func.body[0], IRInstruction::LoadConst(IRConstValue::Int(3))));
+    }
+
+    #[test]
+    fn test_constant_folding_div_by_zero_no_fold() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Div,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(10))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(0))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 0); // Should NOT fold div by zero
+    }
+
+    #[test]
+    fn test_constant_folding_bitwise() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::And,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(0xFF))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(0x0F))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 1);
+        assert!(matches!(&func.body[0], IRInstruction::LoadConst(IRConstValue::Int(0x0F))));
+    }
+
+    #[test]
+    fn test_constant_folding_shift() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Shl,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(10))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 1);
+        assert!(matches!(&func.body[0], IRInstruction::LoadConst(IRConstValue::Int(1024))));
+    }
+
+    #[test]
+    fn test_constant_folding_float_add() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Add,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Float(1.5))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Float(2.5))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 1);
+        if let IRInstruction::LoadConst(IRConstValue::Float(v)) = &func.body[0] {
+            assert!((v - 4.0).abs() < f64::EPSILON);
+        } else {
+            panic!("Expected float constant");
+        }
+    }
+
+    #[test]
+    fn test_constant_folding_no_fold_variable() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Add,
+                left: Box::new(IRInstruction::Load("x".to_string())),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+            },
+        ]);
+        let folded = optimize_constant_folding(&mut func);
+        assert_eq!(folded, 0);
+    }
+
+    #[test]
+    fn test_dead_code_elimination_nops() {
+        let mut func = make_func(vec![
+            IRInstruction::LoadConst(IRConstValue::Int(1)),
+            IRInstruction::Nop,
+            IRInstruction::Nop,
+            IRInstruction::Return,
+        ]);
+        let eliminated = optimize_dead_code_elimination(&mut func);
+        assert_eq!(eliminated, 2);
+        assert_eq!(func.body.len(), 2);
+    }
+
+    #[test]
+    fn test_dead_code_elimination_no_nops() {
+        let mut func = make_func(vec![
+            IRInstruction::LoadConst(IRConstValue::Int(1)),
+            IRInstruction::Return,
+        ]);
+        let eliminated = optimize_dead_code_elimination(&mut func);
+        assert_eq!(eliminated, 0);
+    }
+
+    #[test]
+    fn test_optimize_function_combined() {
+        let mut func = make_func(vec![
+            IRInstruction::BinOp {
+                op: IROp::Add,
+                left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(10))),
+                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(20))),
+            },
+            IRInstruction::Nop,
+            IRInstruction::Return,
+        ]);
+        let (folded, eliminated) = optimize_function(&mut func);
+        assert_eq!(folded, 1);
+        assert_eq!(eliminated, 1);
+        assert_eq!(func.body.len(), 2);
+        assert!(matches!(&func.body[0], IRInstruction::LoadConst(IRConstValue::Int(30))));
+    }
+
+    #[test]
+    fn test_ir_type_byte_sizes() {
+        assert_eq!(IRType::Void.byte_size(), 0);
+        assert_eq!(IRType::I8.byte_size(), 1);
+        assert_eq!(IRType::I16.byte_size(), 2);
+        assert_eq!(IRType::I32.byte_size(), 4);
+        assert_eq!(IRType::I64.byte_size(), 8);
+        assert_eq!(IRType::F32.byte_size(), 4);
+        assert_eq!(IRType::F64.byte_size(), 8);
+        assert_eq!(IRType::Ptr.byte_size(), 8);
+        assert_eq!(IRType::Vec256.byte_size(), 32);
+    }
+
+    #[test]
+    fn test_ir_type_is_integer() {
+        assert!(IRType::I8.is_integer());
+        assert!(IRType::I32.is_integer());
+        assert!(IRType::I64.is_integer());
+        assert!(!IRType::F64.is_integer());
+        assert!(!IRType::Ptr.is_integer());
+    }
+
+    #[test]
+    fn test_ir_type_is_float() {
+        assert!(IRType::F32.is_float());
+        assert!(IRType::F64.is_float());
+        assert!(!IRType::I64.is_float());
+        assert!(!IRType::Void.is_float());
+    }
+
+    #[test]
+    fn test_ir_module_creation() {
+        let module = IRModule::new("TestModule");
+        assert_eq!(module.name, "TestModule");
+        assert!(module.functions.is_empty());
+    }
+
+    #[test]
+    fn test_ir_function_creation() {
+        let func = IRFunction::new(
+            "main".to_string(),
+            vec![("x".to_string(), IRType::I64)],
+            IRType::Void,
+        );
+        assert_eq!(func.name, "main");
+        assert_eq!(func.params.len(), 1);
+        assert!(func.body.is_empty());
+    }
+}

@@ -210,6 +210,225 @@ pub extern "C" fn jdb_print_bool(val: i64) {
     }
 }
 
+// ──────────────────────────────────────────────────────────
+// Java 1.0 — String API Native (sin JVM, sin GC)
+// ──────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn jdb_string_contains(haystack: *const JdbString, needle: *const JdbString) -> i64 {
+    if haystack.is_null() || needle.is_null() { return 0; }
+    unsafe {
+        let h = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*haystack).ptr, (*haystack).len as usize));
+        let n = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*needle).ptr, (*needle).len as usize));
+        if h.contains(n) { 1 } else { 0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_substring(s: *const JdbString, start: i64, end: i64) -> *const JdbString {
+    if s.is_null() { return std::ptr::null(); }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let start = start.max(0) as usize;
+        let end = (end as usize).min(src.len());
+        if start > end { return std::ptr::null(); }
+        let sub = &src[start..end];
+        let boxed = Box::leak(sub.to_string().into_boxed_str());
+        let jdb = Box::new(JdbString { ptr: boxed.as_ptr(), len: boxed.len() as u32 });
+        Box::leak(jdb) as *const JdbString
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_to_upper(s: *const JdbString) -> *const JdbString {
+    if s.is_null() { return std::ptr::null(); }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let upper = src.to_uppercase();
+        let boxed = Box::leak(upper.into_boxed_str());
+        let jdb = Box::new(JdbString { ptr: boxed.as_ptr(), len: boxed.len() as u32 });
+        Box::leak(jdb) as *const JdbString
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_to_lower(s: *const JdbString) -> *const JdbString {
+    if s.is_null() { return std::ptr::null(); }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let lower = src.to_lowercase();
+        let boxed = Box::leak(lower.into_boxed_str());
+        let jdb = Box::new(JdbString { ptr: boxed.as_ptr(), len: boxed.len() as u32 });
+        Box::leak(jdb) as *const JdbString
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_index_of(s: *const JdbString, needle: *const JdbString) -> i64 {
+    if s.is_null() || needle.is_null() { return -1; }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let n = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*needle).ptr, (*needle).len as usize));
+        src.find(n).map(|i| i as i64).unwrap_or(-1)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_char_at(s: *const JdbString, index: i64) -> i64 {
+    if s.is_null() { return 0; }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let idx = index as usize;
+        if idx >= src.len() { return 0; }
+        src.as_bytes()[idx] as i64
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_replace(s: *const JdbString, from: *const JdbString, to: *const JdbString) -> *const JdbString {
+    if s.is_null() || from.is_null() || to.is_null() { return s; }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let f = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*from).ptr, (*from).len as usize));
+        let t = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*to).ptr, (*to).len as usize));
+        let replaced = src.replace(f, t);
+        let boxed = Box::leak(replaced.into_boxed_str());
+        let jdb = Box::new(JdbString { ptr: boxed.as_ptr(), len: boxed.len() as u32 });
+        Box::leak(jdb) as *const JdbString
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_trim(s: *const JdbString) -> *const JdbString {
+    if s.is_null() { return std::ptr::null(); }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let trimmed = src.trim();
+        let boxed = Box::leak(trimmed.to_string().into_boxed_str());
+        let jdb = Box::new(JdbString { ptr: boxed.as_ptr(), len: boxed.len() as u32 });
+        Box::leak(jdb) as *const JdbString
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_starts_with(s: *const JdbString, prefix: *const JdbString) -> i64 {
+    if s.is_null() || prefix.is_null() { return 0; }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let p = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*prefix).ptr, (*prefix).len as usize));
+        if src.starts_with(p) { 1 } else { 0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_ends_with(s: *const JdbString, suffix: *const JdbString) -> i64 {
+    if s.is_null() || suffix.is_null() { return 0; }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        let p = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*suffix).ptr, (*suffix).len as usize));
+        if src.ends_with(p) { 1 } else { 0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_int_to_string(val: i64) -> *const JdbString {
+    let s = format!("{}", val);
+    let boxed = Box::leak(s.into_boxed_str());
+    let jdb = Box::new(JdbString { ptr: boxed.as_ptr(), len: boxed.len() as u32 });
+    Box::leak(jdb) as *const JdbString
+}
+
+// ──────────────────────────────────────────────────────────
+// java.lang.Math — Native x86-64 (sin JVM)
+// ──────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn jdb_math_abs_int(val: i64) -> i64 {
+    val.abs()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_abs_float(val: f64) -> f64 {
+    val.abs()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_max_int(a: i64, b: i64) -> i64 {
+    a.max(b)
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_min_int(a: i64, b: i64) -> i64 {
+    a.min(b)
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_max_float(a: f64, b: f64) -> f64 {
+    a.max(b)
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_min_float(a: f64, b: f64) -> f64 {
+    a.min(b)
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_sqrt(val: f64) -> f64 {
+    val.sqrt()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_pow(base: f64, exp: f64) -> f64 {
+    base.powf(exp)
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_floor(val: f64) -> f64 {
+    val.floor()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_ceil(val: f64) -> f64 {
+    val.ceil()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_sin(val: f64) -> f64 {
+    val.sin()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_cos(val: f64) -> f64 {
+    val.cos()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_log(val: f64) -> f64 {
+    val.ln()
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_math_round(val: f64) -> i64 {
+    val.round() as i64
+}
+
+/// Math.PI and Math.E constants
+pub const JDB_MATH_PI: f64 = std::f64::consts::PI;
+pub const JDB_MATH_E: f64 = std::f64::consts::E;
+
+// ──────────────────────────────────────────────────────────
+// Integer.parseInt / Integer.toString native
+// ──────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn jdb_parse_int(s: *const JdbString) -> i64 {
+    if s.is_null() { return 0; }
+    unsafe {
+        let src = std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s).ptr, (*s).len as usize));
+        src.trim().parse::<i64>().unwrap_or(0)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CpuFeatures {
     pub has_avx2: bool,
