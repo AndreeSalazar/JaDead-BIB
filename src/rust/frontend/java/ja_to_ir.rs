@@ -12,14 +12,28 @@ use crate::gc_plus::scope_tracker::ScopeTracker;
 use crate::gc_plus::loop_anticipator::LoopAnticipator;
 use crate::gc_plus::escape_detector::EscapeDetector;
 use crate::gc_plus::region_memory::RegionMemory;
+use std::collections::HashMap;
+
+#[derive(Debug, Clone)]
+pub struct ClassLayout {
+    pub name: String,
+    pub size: u32,
+    pub fields_offset: HashMap<String, u32>,
+    pub fields_type: HashMap<String, IRType>,
+}
 
 pub struct JaToIrGenerator {
     type_checker: JaTypeChecker,
     current_functions: Vec<IRFunction>,
+    local_types: HashMap<String, JaType>,
     scope_tracker: ScopeTracker,
     loop_anticipator: LoopAnticipator,
     escape_detector: EscapeDetector,
     region_memory: RegionMemory,
+    
+    // OOP Memory Mapping 
+    class_layouts: HashMap<String, ClassLayout>,
+    current_class: Option<String>,
     
     // Label tracking for control flow
     label_count: usize,
@@ -30,10 +44,13 @@ impl JaToIrGenerator {
         Self {
             type_checker: JaTypeChecker::new(),
             current_functions: Vec::new(),
+            local_types: HashMap::new(),
             scope_tracker: ScopeTracker::new(),
             loop_anticipator: LoopAnticipator::new(),
             escape_detector: EscapeDetector::new(),
             region_memory: RegionMemory::new(),
+            class_layouts: HashMap::new(),
+            current_class: None,
             label_count: 0,
         }
     }
@@ -56,9 +73,38 @@ impl JaToIrGenerator {
 
         // [GC PLUS] Módulo 4: Default Codebase Region
         let root_region_id = self.region_memory.define_region("App_Root_Region");
-        // Simulated root injection if it had a top level execution block
-        // func.body.push(IRInstruction::GCPlusRegionCreate { region_id: root_region_id, size: 8192 });
 
+        // Pass 1: Compute Native Structural OOP Byte Layouts (Classes, Fields)
+        for decl in &ast.declarations {
+            if let JaTypeDecl::Class { name, body, .. } = decl {
+                let mut offset = 0;
+                let mut fields_offset = HashMap::new();
+                let mut fields_type = HashMap::new();
+                
+                for member in body {
+                    if let JaClassMember::Field { name: f_name, ty, .. } = member {
+                        let ir_type = self.type_checker.resolve_type(ty)?;
+                        let mut size = ir_type.byte_size() as u32;
+                        if size == 0 { size = 8; } // Pointer fallback
+                        
+                        fields_offset.insert(f_name.clone(), offset);
+                        fields_type.insert(f_name.clone(), ir_type);
+                        offset += size;
+                    }
+                }
+                
+                if offset == 0 { offset = 8; } // Safe empty object size
+                
+                self.class_layouts.insert(name.clone(), ClassLayout {
+                    name: name.clone(),
+                    size: offset,
+                    fields_offset,
+                    fields_type,
+                });
+            }
+        }
+
+        // Pass 2: Method and body Native generation
         for decl in &ast.declarations {
             self.generate_type_decl(decl)?;
         }
@@ -77,9 +123,11 @@ impl JaToIrGenerator {
     fn generate_type_decl(&mut self, decl: &JaTypeDecl) -> Result<(), String> {
         match decl {
             JaTypeDecl::Class { name, body, .. } => {
+                self.current_class = Some(name.clone());
                 for member in body {
                     self.generate_class_member(name, member)?;
                 }
+                self.current_class = None;
                 Ok(())
             }
             JaTypeDecl::Record { name, body, .. } => {
@@ -180,9 +228,10 @@ impl JaToIrGenerator {
             JaStmt::Block(b) => self.generate_block(b, func),
             JaStmt::Expr(e) => {
                 let ir_expr = self.generate_expr(e, func)?;
-                // Emit side-effecting expressions (Calls or Native Prints)
+                // Emit side-effecting expressions
                 match ir_expr {
-                    IRInstruction::Call { .. } | IRInstruction::PrintStr(_) | IRInstruction::PrintInt => {
+                    IRInstruction::Call { .. } | IRInstruction::PrintStr(_) | IRInstruction::PrintInt 
+                    | IRInstruction::Store(_) | IRInstruction::PropertySet { .. } | IRInstruction::StoreElement { .. } => {
                         func.body.push(ir_expr);
                     }
                     _ => {}
@@ -192,6 +241,7 @@ impl JaToIrGenerator {
             JaStmt::LocalVarDecl { ty, declarators } => {
                 let ir_type = self.type_checker.resolve_type(ty)?;
                 for decl in declarators {
+                    self.local_types.insert(decl.name.clone(), ty.clone());
                     func.body.push(IRInstruction::VarDecl { 
                         name: decl.name.clone(), 
                         ir_type: ir_type.clone() 
@@ -310,50 +360,89 @@ impl JaToIrGenerator {
             JaExpr::BooleanLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Bool(*v))),
             JaExpr::StringLiteral(v) => Ok(IRInstruction::LoadString(v.clone())),
             JaExpr::Name(n) => Ok(IRInstruction::Load(n.clone())),
-            JaExpr::FieldAccess { target, field } => {
-                // E.g. this.vida, target=this, field=vida
-                // In ADeadOp v3.0, PropertyGet is used
-                let t = self.generate_expr(target, func)?;
-                // Simulating extraction of root var name
-                let root_obj = match t {
-                    IRInstruction::Load(n) | IRInstruction::LoadString(n) => n,
-                    _ => "temp_obj".to_string()
+            JaExpr::NewArray { ty, dimensions, .. } => {
+                let ir_type = self.type_checker.resolve_type(ty)?;
+                if dimensions.is_empty() { return Err("Array dimension required".to_string()); }
+                let count = if let Some(Some(c)) = dimensions.get(0) {
+                    Box::new(self.generate_expr(c, func)?)
+                } else {
+                    return Err("Empty array dimensions not supported natively yet".to_string());
                 };
+                Ok(IRInstruction::AllocArray { ir_type, count })
+            }
+            JaExpr::NewObject { ty, args: _, body: _ } => {
+                let name = match ty {
+                    &JaType::Class(ref c) => c.clone(),
+                    _ => return Err("Only Classes can be directly instantiated via new natively".to_string()),
+                };
+                let layout = self.class_layouts.get(&name).ok_or_else(|| format!("Class {} not found", name))?;
+                Ok(IRInstruction::AllocObject { class_name: name.clone(), size: layout.size })
+            }
+            JaExpr::FieldAccess { target, field } => {
+                let t = self.generate_expr(target, func)?;
+                if field == "length" {
+                    return Ok(IRInstruction::ArrayLength { array: Box::new(t.clone()) });
+                }
                 
+                let (root_obj, class_name) = match t {
+                    IRInstruction::Load(n) => {
+                        if n == "System" && field == "out" {
+                            return Ok(IRInstruction::Load("System.out".to_string()));
+                        }
+
+                        let cname = if n == "this" {
+                            self.current_class.clone().unwrap_or_default()
+                        } else if let Some(JaType::Class(c)) = self.local_types.get(&n) {
+                            c.clone()
+                        } else { "".to_string() };
+                        (n, cname)
+                    },
+                    _ => ("temp_obj".to_string(), "".to_string())
+                };
+
                 // [GC PLUS] Módulo 3: Escape Detector Null Safety
-                // In strict mode, we statically prove target is not null natively
                 self.escape_detector.analyze_bounds(&root_obj, None, None);
                 func.body.push(IRInstruction::GCPlusEscapeCheck { ptr: root_obj.clone(), bounds: (0, 0) });
                 
-                Ok(IRInstruction::PropertyGet { obj: root_obj, name: field.clone() })
+                let layout = self.class_layouts.get(&class_name).ok_or_else(|| format!("Class {} layout not found for field {}", class_name, field))?;
+                let offset = *layout.fields_offset.get(field).unwrap_or(&0);
+                
+                Ok(IRInstruction::PropertyGet { obj: root_obj, offset })
             }
             JaExpr::ArrayAccess { array, index } => {
                 let a = self.generate_expr(array, func)?;
-                let root_obj = match a {
-                    IRInstruction::Load(n) | IRInstruction::LoadString(n) => n,
-                    _ => "temp_array".to_string()
-                };
-                
-                let _i = self.generate_expr(index, func)?;
-                // [GC PLUS] Módulo 3: Array Bounds Static Checker
-                // If it isn't resolved statically, we emit the IR dynamic verifier
-                func.body.push(IRInstruction::GCPlusEscapeCheck { ptr: root_obj.clone(), bounds: (0, 9999) }); // stub bound size
-                
-                Ok(IRInstruction::Load(format!("{}_indexed", root_obj))) // stub return
+                let idx = self.generate_expr(index, func)?;
+                Ok(IRInstruction::LoadElement { array: Box::new(a), index: Box::new(idx) })
             }
             JaExpr::Assign { target, value, .. } => {
                 let val = self.generate_expr(value, func)?;
-                func.body.push(val); // Put value on stack/rax
                 
                 // If it's assigning to a field like this.vida = 100
                 if let JaExpr::FieldAccess { target: root_t, field } = &**target {
+                    func.body.push(val); 
                     let rt = self.generate_expr(root_t, func)?;
-                    let root_obj = match rt {
-                        IRInstruction::Load(n) | IRInstruction::LoadString(n) => n,
-                        _ => "temp_obj".to_string()
+                    let (root_obj, class_name) = match rt {
+                        IRInstruction::Load(n) => {
+                            let cname = if n == "this" {
+                                self.current_class.clone().unwrap_or_default()
+                            } else if let Some(JaType::Class(c)) = self.local_types.get(&n) {
+                                c.clone()
+                            } else { "".to_string() };
+                            (n, cname)
+                        },
+                        _ => ("temp_obj".to_string(), "".to_string())
                     };
-                    Ok(IRInstruction::PropertySet { obj: root_obj, name: field.clone() })
+                    
+                    let layout = self.class_layouts.get(&class_name).ok_or_else(|| format!("Class {} layout not found for field {}", class_name, field))?;
+                    let offset = *layout.fields_offset.get(field).unwrap_or(&0);
+                    
+                    Ok(IRInstruction::PropertySet { obj: root_obj, offset })
+                } else if let JaExpr::ArrayAccess { array, index } = &**target {
+                    let a = self.generate_expr(array, func)?;
+                    let idx = self.generate_expr(index, func)?;
+                    Ok(IRInstruction::StoreElement { array: Box::new(a), index: Box::new(idx), value: Box::new(val) })
                 } else if let JaExpr::Name(n) = &**target {
+                    func.body.push(val);
                     Ok(IRInstruction::Store(n.clone()))
                 } else {
                     Err("Unsupported assignment target".to_string())
@@ -362,6 +451,36 @@ impl JaToIrGenerator {
             JaExpr::Binary { op, left, right } => {
                 let l = Box::new(self.generate_expr(left, func)?);
                 let r = Box::new(self.generate_expr(right, func)?);
+                
+                // If this is string concatenation, delegate to native C-hook
+                if *op == JaBinOp::Add {
+                    let is_l_str = match &*l {
+                        IRInstruction::LoadString(_) => true,
+                        IRInstruction::Load(name) => {
+                            if let Some(JaType::Class(class)) = self.local_types.get(name) {
+                                class == "String"
+                            } else { false }
+                        }
+                        IRInstruction::Call { func: fn_name, .. } => fn_name == "jdb_string_concat",
+                        _ => false,
+                    };
+                    
+                    let is_r_str = match &*r {
+                        IRInstruction::LoadString(_) => true,
+                        IRInstruction::Load(name) => {
+                            if let Some(JaType::Class(class)) = self.local_types.get(name) {
+                                class == "String"
+                            } else { false }
+                        }
+                        IRInstruction::Call { func: fn_name, .. } => fn_name == "jdb_string_concat",
+                        _ => false,
+                    };
+
+                    if is_l_str || is_r_str {
+                        return Ok(IRInstruction::Call { func: "jdb_string_concat".to_string(), args: vec![*l, *r] });
+                    }
+                }
+
                 match op {
                     JaBinOp::Add | JaBinOp::Sub | JaBinOp::Mul | JaBinOp::Div | JaBinOp::Rem | 
                     JaBinOp::Shl | JaBinOp::Shr | JaBinOp::BitAnd | JaBinOp::BitOr | JaBinOp::BitXor => {
@@ -417,23 +536,66 @@ impl JaToIrGenerator {
                     _ => Err(format!("Unsupported unary op {:?}", op))
                 }
             }
-            JaExpr::MethodCall { name, args, .. } => {
+            JaExpr::MethodCall { target, name, args, .. } => {
                 let mut ir_args = Vec::new();
+                
+                if let Some(t) = target {
+                    ir_args.push(self.generate_expr(t, func)?);
+                }
+                
                 for a in args {
                     ir_args.push(self.generate_expr(a, func)?);
                 }
                 
-                // Built-in mapping -> print maps to ADeadOp native Print
+                // Built-in mapping
                 if name == "System.out.println" || name == "println" || name == "print" {
-                    if let Some(arg) = ir_args.first() {
-                        match arg {
-                            IRInstruction::LoadString(s) => return Ok(IRInstruction::PrintStr(s.clone())),
-                            _ => {
-                                func.body.push(arg.clone()); // put arg in rax
-                                return Ok(IRInstruction::PrintInt);
+                    // Extract the true argument
+                    let actual_arg = if target.is_some() && ir_args.len() > 1 {
+                        &ir_args[1]
+                    } else if let Some(a) = ir_args.first() {
+                        a
+                    } else {
+                        return Ok(IRInstruction::PrintStr("".to_string()));
+                    };
+
+                    match actual_arg {
+                        IRInstruction::LoadString(s) => return Ok(IRInstruction::PrintStr(s.clone())),
+                        IRInstruction::Load(ref var_name) => {
+                            if let Some(JaType::Class(ref class_name)) = self.local_types.get(var_name) {
+                                if class_name == "String" {
+                                    return Ok(IRInstruction::Call { func: "jdb_print_obj".to_string(), args: vec![actual_arg.clone()] });
+                                }
                             }
+                            func.body.push(actual_arg.clone());
+                            return Ok(IRInstruction::PrintInt);
+                        }
+                        IRInstruction::Call { func: ref fn_name, args: ref _a } => {
+                            if fn_name == "jdb_string_concat" || fn_name == "jdb_string_len" {
+                                if fn_name == "jdb_string_concat" {
+                                    return Ok(IRInstruction::Call { func: "jdb_print_obj".to_string(), args: vec![actual_arg.clone()] });
+                                } else {
+                                    func.body.push(actual_arg.clone());
+                                    return Ok(IRInstruction::PrintInt);
+                                }
+                            }
+                            // Default fallback
+                            func.body.push(actual_arg.clone());
+                            return Ok(IRInstruction::PrintInt);
+                        }
+                        _ => {
+                            func.body.push(actual_arg.clone());
+                            return Ok(IRInstruction::PrintInt);
                         }
                     }
+                }
+                
+                // String core extensions mappings
+                if name == "length" {
+                    // Target is ir_args[0], since length() operates on an object
+                    return Ok(IRInstruction::Call { func: "jdb_string_len".to_string(), args: vec![ir_args[0].clone()] });
+                }
+                if name == "equals" || name == "contentEquals" {
+                    return Ok(IRInstruction::Call { func: "jdb_string_eq".to_string(), args: vec![ir_args[0].clone(), ir_args[1].clone()] });
                 }
 
                 Ok(IRInstruction::Call { func: name.clone(), args: ir_args })

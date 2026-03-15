@@ -53,6 +53,12 @@ pub fn jdb_flush_prints() -> String {
     }
 }
 
+#[repr(C)]
+pub struct JdbString {
+    pub ptr: *const u8,
+    pub len: u32,
+}
+
 #[no_mangle]
 pub extern "C" fn jdb_print_str(ptr: *const u8, len: u32) {
     let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
@@ -62,6 +68,105 @@ pub extern "C" fn jdb_print_str(ptr: *const u8, len: u32) {
             buf.push('\n');
         }
     }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_print_obj(s: *const JdbString) {
+    if s.is_null() {
+        if let Ok(mut buf) = PRINT_BUFFER.lock() { buf.push_str("null\n"); }
+        return;
+    }
+    let slice = unsafe { std::slice::from_raw_parts((*s).ptr, (*s).len as usize) };
+    if let Ok(st) = std::str::from_utf8(slice) {
+        if let Ok(mut buf) = PRINT_BUFFER.lock() {
+            buf.push_str(st);
+            buf.push('\n');
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_len(s: *const JdbString) -> i64 {
+    if s.is_null() { return 0; }
+    unsafe { (*s).len as i64 }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_eq(s1: *const JdbString, s2: *const JdbString) -> i64 {
+    if s1.is_null() && s2.is_null() { return 1; }
+    if s1.is_null() || s2.is_null() { return 0; }
+    unsafe {
+        if (*s1).len != (*s2).len { return 0; }
+        let slice1 = std::slice::from_raw_parts((*s1).ptr, (*s1).len as usize);
+        let slice2 = std::slice::from_raw_parts((*s2).ptr, (*s2).len as usize);
+        if slice1 == slice2 { 1 } else { 0 }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_string_concat(s1: *const JdbString, s2: *const JdbString) -> *const JdbString {
+    let str1 = if s1.is_null() { "" } else {
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s1).ptr, (*s1).len as usize)) }
+    };
+    let str2 = if s2.is_null() { "" } else {
+        unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts((*s2).ptr, (*s2).len as usize)) }
+    };
+    
+    let concat = format!("{}{}", str1, str2);
+    let boxed_str = Box::leak(concat.into_boxed_str());
+    let jdb_str = Box::new(JdbString {
+        ptr: boxed_str.as_ptr(),
+        len: boxed_str.len() as u32,
+    });
+    Box::leak(jdb_str) as *const JdbString
+}
+
+// ──────────────────────────────────────────────────────────
+// Java 1.0 (1996) — V1 ADeadOp Array Structures
+// ──────────────────────────────────────────────────────────
+
+#[repr(C)]
+pub struct JdbArray {
+    pub ptr: *mut u8,
+    pub len: u32,
+    pub element_size: u32,
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_alloc_array(count: u32, element_size: u32) -> *const JdbArray {
+    let total_bytes = (count as usize) * (element_size as usize);
+    let raw_buf = unsafe {
+        std::alloc::alloc_zeroed(
+            std::alloc::Layout::from_size_align(total_bytes.max(1), 8).unwrap()
+        )
+    };
+    let jdb_arr = Box::new(JdbArray {
+        ptr: raw_buf,
+        len: count,
+        element_size,
+    });
+    Box::leak(jdb_arr) as *const JdbArray
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_array_len(arr: *const JdbArray) -> i64 {
+    if arr.is_null() { return 0; }
+    unsafe { (*arr).len as i64 }
+}
+
+// ──────────────────────────────────────────────────────────
+// Java 1.0 (1996) — V1 ADeadOp OOP Native Allocation
+// ──────────────────────────────────────────────────────────
+
+#[no_mangle]
+pub extern "C" fn jdb_alloc_obj(size: u32) -> *mut u8 {
+    let size = size as usize;
+    let raw_buf = unsafe {
+        std::alloc::alloc_zeroed(
+            std::alloc::Layout::from_size_align(size.max(1), 8).unwrap()
+        )
+    };
+    raw_buf
 }
 
 #[no_mangle]

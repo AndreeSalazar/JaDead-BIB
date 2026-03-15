@@ -15,7 +15,6 @@ pub struct ISATranslator {
 struct Patch {
     offset: usize,
     target_label: String,
-    is_conditional: bool,
 }
 
 impl ISATranslator {
@@ -67,7 +66,7 @@ impl ISATranslator {
             }
             IRInstruction::Jump(name) => {
                 self.code.push(0xE9); // jmp rel32
-                patches.push(Patch { offset: self.code.len(), target_label: name.clone(), is_conditional: false });
+                patches.push(Patch { offset: self.code.len(), target_label: name.clone() });
                 self.code.extend_from_slice(&[0,0,0,0]);
             }
             IRInstruction::BranchIfFalse(name) => {
@@ -75,7 +74,7 @@ impl ISATranslator {
                 self.code.extend_from_slice(&[0x48, 0x83, 0xF8, 0x00]);
                 // je rel32
                 self.code.extend_from_slice(&[0x0F, 0x84]);
-                patches.push(Patch { offset: self.code.len(), target_label: name.clone(), is_conditional: true });
+                patches.push(Patch { offset: self.code.len(), target_label: name.clone() });
                 self.code.extend_from_slice(&[0,0,0,0]);
             }
             IRInstruction::VarDecl { name, .. } => {
@@ -92,6 +91,24 @@ impl ISATranslator {
                 let off = *var_map.get(name).unwrap();
                 self.code.extend_from_slice(&[0x48, 0x89, 0x45]); // mov [rbp - off], rax
                 self.code.push((256 - off) as u8);
+            }
+            IRInstruction::PropertySet { obj, offset } => {
+                // value is in rax, we need to save it to [obj_ptr + offset]
+                self.code.push(0x50); // push rax (value)
+                
+                let off_local = *var_map.get(obj).unwrap_or(&0);
+                self.code.extend_from_slice(&[0x48, 0x8B, 0x5D]); // mov rbx, [rbp - off_local]
+                self.code.push((256 - off_local) as u8);
+                
+                self.code.push(0x58); // pop rax (value)
+                
+                // mov [rbx + offset], rax
+                if *offset < 128 {
+                    self.code.extend_from_slice(&[0x48, 0x89, 0x43, *offset as u8]);
+                } else {
+                    self.code.extend_from_slice(&[0x48, 0x89, 0x83]);
+                    self.code.extend_from_slice(&offset.to_le_bytes());
+                }
             }
             IRInstruction::PrintStr(s) => {
                 let boxed_str = Box::leak(s.clone().into_boxed_str());
@@ -144,6 +161,136 @@ impl ISATranslator {
                 let off = *var_map.get(name).unwrap_or(&0);
                 self.code.extend_from_slice(&[0x48, 0x8B, 0x45]); // mov rax, [rbp - off]
                 self.code.push((256 - off) as u8);
+            }
+            IRInstruction::AllocObject { class_name: _, size } => {
+                self.code.extend_from_slice(&[0x48, 0xC7, 0xC1]); // mov rcx, imm32 (Arg 1: size)
+                self.code.extend_from_slice(&size.to_le_bytes()); 
+                
+                let fn_ptr = crate::backend::jit::jdb_alloc_obj as *const () as u64;
+                self.code.extend_from_slice(&[0x48, 0xB8]); // mov rax, fn_ptr
+                self.code.extend_from_slice(&fn_ptr.to_le_bytes());
+                self.code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]); // shadow space x64 ABI
+                self.code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+                self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]); // restore
+            }
+            IRInstruction::PropertyGet { obj, offset } => {
+                let off_local = *var_map.get(obj).unwrap_or(&0);
+                self.code.extend_from_slice(&[0x48, 0x8B, 0x45]); // mov rax, [rbp - off_local] (load object ptr)
+                self.code.push((256 - off_local) as u8);
+                
+                // mov rax, [rax + offset]
+                if *offset < 128 {
+                    self.code.extend_from_slice(&[0x48, 0x8B, 0x40, *offset as u8]);
+                } else {
+                    self.code.extend_from_slice(&[0x48, 0x8B, 0x80]);
+                    self.code.extend_from_slice(&offset.to_le_bytes()); // 32-bit offset
+                }
+            }
+            IRInstruction::AllocArray { ir_type, count } => {
+                let mut size = ir_type.byte_size() as u32;
+                if size == 0 { size = 8; } // Default fallback for object references
+                let element_size: u32 = size;
+                
+                self.emit_expr(count, var_map, next_offset, labels, patches); // rax = count
+                self.code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (Arg 1)
+                
+                self.code.extend_from_slice(&[0x48, 0xC7, 0xC2]); // mov rdx, imm32 (Arg 2)
+                self.code.extend_from_slice(&element_size.to_le_bytes()); 
+                
+                let fn_ptr = crate::backend::jit::jdb_alloc_array as *const () as u64;
+                self.code.extend_from_slice(&[0x48, 0xB8]); // mov rax, fn_ptr
+                self.code.extend_from_slice(&fn_ptr.to_le_bytes());
+                self.code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]); // shadow space
+                self.code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+                self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]); // restore
+            }
+            IRInstruction::LoadElement { array, index } => {
+                self.emit_expr(array, var_map, next_offset, labels, patches);
+                self.code.push(0x50); // push rax (array struct ptr)
+                self.emit_expr(index, var_map, next_offset, labels, patches);
+                self.code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax (index)
+                self.code.push(0x58); // pop rax (array struct ptr)
+                
+                // rax = JdbArray ptr, rbx = index
+                self.code.extend_from_slice(&[0x48, 0x8B, 0x10]); // mov rdx, [rax] (ptr to buf)
+                self.code.extend_from_slice(&[0x44, 0x8B, 0x40, 0x0C]); // mov r8d, dword ptr [rax+12]
+                self.code.extend_from_slice(&[0x49, 0x0F, 0xAF, 0xD8]); // imul rbx, r8
+                self.code.extend_from_slice(&[0x48, 0x01, 0xDA]); // add rdx, rbx
+                self.code.extend_from_slice(&[0x48, 0x8B, 0x02]); // mov rax, [rdx]
+            }
+            IRInstruction::StoreElement { array, index, value } => {
+                self.emit_expr(array, var_map, next_offset, labels, patches);
+                self.code.push(0x50); // push rax (array ptr)
+                self.emit_expr(index, var_map, next_offset, labels, patches);
+                self.code.extend_from_slice(&[0x48, 0x89, 0xC3]); // mov rbx, rax (index)
+                self.code.push(0x50); // push rbx (save index)
+                
+                self.emit_expr(value, var_map, next_offset, labels, patches);
+                self.code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax (value)
+                
+                self.code.push(0x5B); // pop rbx (index)
+                self.code.push(0x58); // pop rax (array ptr)
+                
+                // rax = array ptr, rbx = index, rcx = value
+                self.code.extend_from_slice(&[0x48, 0x8B, 0x10]); // mov rdx, [rax] (ptr to buf)
+                self.code.extend_from_slice(&[0x44, 0x8B, 0x40, 0x0C]); // mov r8d, dword ptr [rax+12]
+                self.code.extend_from_slice(&[0x49, 0x0F, 0xAF, 0xD8]); // imul rbx, r8
+                self.code.extend_from_slice(&[0x48, 0x01, 0xDA]); // add rdx, rbx
+                
+                self.code.extend_from_slice(&[0x48, 0x89, 0x0A]); // mov [rdx], rcx
+            }
+            IRInstruction::ArrayLength { array } => {
+                self.emit_expr(array, var_map, next_offset, labels, patches);
+                // rax = JdbArray ptr
+                self.code.extend_from_slice(&[0x8B, 0x40, 0x08]); // mov eax, dword ptr [rax + 8]
+                // Zero extend to 64-bit just in case, though mov eax zero-extends implicitly
+            }
+            IRInstruction::LoadString(s) => {
+                let boxed_str = Box::leak(s.clone().into_boxed_str());
+                let jdb_str = Box::new(crate::backend::jit::JdbString {
+                    ptr: boxed_str.as_ptr(),
+                    len: boxed_str.len() as u32,
+                });
+                let ptr_val = Box::leak(jdb_str) as *const _ as u64;
+                self.code.extend_from_slice(&[0x48, 0xB8]);
+                self.code.extend_from_slice(&ptr_val.to_le_bytes());
+            }
+            IRInstruction::Call { func, args } => {
+                for arg in args {
+                    self.emit_expr(arg, var_map, next_offset, labels, patches);
+                    self.code.push(0x50); // push rax
+                }
+                
+                let abi_regs = vec![
+                    vec![0x48, 0x89, 0xC1], // mov rcx, rax (Arg 1)
+                    vec![0x48, 0x89, 0xC2], // mov rdx, rax (Arg 2)
+                    vec![0x49, 0x89, 0xC0], // mov r8, rax  (Arg 3)
+                    vec![0x49, 0x89, 0xC1], // mov r9, rax  (Arg 4)
+                ];
+                
+                for i in (0..args.len()).rev() {
+                    self.code.push(0x58); // pop rax
+                    if i < abi_regs.len() {
+                        self.code.extend_from_slice(&abi_regs[i]);
+                    }
+                }
+                
+                let fn_ptr = match func.as_str() {
+                    "jdb_string_len" => crate::backend::jit::jdb_string_len as *const () as u64,
+                    "jdb_string_eq" => crate::backend::jit::jdb_string_eq as *const () as u64,
+                    "jdb_string_concat" => crate::backend::jit::jdb_string_concat as *const () as u64,
+                    "jdb_print_str" => crate::backend::jit::jdb_print_str as *const () as u64,
+                    "jdb_print_obj" => crate::backend::jit::jdb_print_obj as *const () as u64,
+                    _ => 0,
+                };
+                
+                if fn_ptr != 0 {
+                    self.code.extend_from_slice(&[0x48, 0xB8]); // mov rax, fn_ptr
+                    self.code.extend_from_slice(&fn_ptr.to_le_bytes());
+                    self.code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]); // shadow space x64 ABI
+                    self.code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+                    self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]); // restore
+                }
             }
             IRInstruction::BinOp { op, left, right } => {
                 self.emit_expr(left, var_map, next_offset, labels, patches);

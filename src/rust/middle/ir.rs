@@ -150,9 +150,9 @@ pub enum IRInstruction {
     GeneratorNext,                          // call next() on generator
     GeneratorSend(Box<IRInstruction>),      // send value to generator
 
-    // v3.0 — Property descriptor
-    PropertyGet { obj: String, name: String },
-    PropertySet { obj: String, name: String },
+    // v3.0 Native OOP — Struct field binding
+    PropertyGet { obj: String, offset: u32 },
+    PropertySet { obj: String, offset: u32 },
 
     // v3.0 — LRU Cache
     LruCacheCheck { func: String, key: Box<IRInstruction> },
@@ -197,6 +197,15 @@ pub enum IRInstruction {
     VkDispatch { shader: String, x: Box<IRInstruction>, y: Box<IRInstruction>, z: Box<IRInstruction> }, // vkCmdDispatch
     VkBufferFree { ptr: String },                       // vkFreeMemory + vkDestroyBuffer
     VkDestroy,                                          // vkDestroyDevice + vkDestroyInstance
+
+    // Array operations
+    AllocArray { ir_type: IRType, count: Box<IRInstruction> },
+    LoadElement { array: Box<IRInstruction>, index: Box<IRInstruction> },
+    StoreElement { array: Box<IRInstruction>, index: Box<IRInstruction>, value: Box<IRInstruction> },
+    ArrayLength { array: Box<IRInstruction> },
+
+    // OOP operations
+    AllocObject { class_name: String, size: u32 },
 
     // --- GC Plus 💀☕ Exclusive Instructions (JaDead-BIB v1.0) ---
     // Módulo 1: Scope Tracker

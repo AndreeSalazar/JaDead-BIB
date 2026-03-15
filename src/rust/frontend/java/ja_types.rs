@@ -22,7 +22,7 @@ impl JaTypeChecker {
             JaType::Byte => Ok(IRType::I8),
             JaType::Char => Ok(IRType::I16),
             JaType::Short => Ok(IRType::I16),
-            JaType::Int => Ok(IRType::I32), // In some archs mapped to I64 depending on ABI, standard is I32
+            JaType::Int => Ok(IRType::I64), // ADeadOp standardizes primitives natively to I64 (64-bit words)
             JaType::Long => Ok(IRType::I64),
             JaType::Float => Ok(IRType::F32),
             JaType::Double => Ok(IRType::F64),
@@ -76,7 +76,7 @@ mod tests {
     #[test]
     fn test_primitive_resolution() {
         let checker = JaTypeChecker::new();
-        assert_eq!(checker.resolve_type(&JaType::Int).unwrap(), IRType::I32);
+        assert_eq!(checker.resolve_type(&JaType::Int).unwrap(), IRType::I64);
         assert_eq!(checker.resolve_type(&JaType::Double).unwrap(), IRType::F64);
         assert_eq!(checker.resolve_type(&JaType::Boolean).unwrap(), IRType::I8);
     }

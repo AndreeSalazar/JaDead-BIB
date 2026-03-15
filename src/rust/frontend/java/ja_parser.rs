@@ -717,6 +717,66 @@ impl JaParser {
             Some(JaToken::False) => { self.advance(); JaExpr::BooleanLiteral(false) }
             Some(JaToken::Null) => { self.advance(); JaExpr::Null }
             Some(JaToken::This) => { self.advance(); JaExpr::Name("this".to_string()) }
+            Some(JaToken::New) => {
+                self.advance();
+                
+                // Parse base type exactly manually to avoid parse_type consuming empty brackets []
+                let ty = match self.peek() {
+                    Some(JaToken::Int) => { self.advance(); JaType::Int }
+                    Some(JaToken::Long) => { self.advance(); JaType::Long }
+                    Some(JaToken::Float) => { self.advance(); JaType::Float }
+                    Some(JaToken::Double) => { self.advance(); JaType::Double }
+                    Some(JaToken::Boolean) => { self.advance(); JaType::Boolean }
+                    Some(JaToken::Char) => { self.advance(); JaType::Char }
+                    Some(JaToken::Byte) => { self.advance(); JaType::Byte }
+                    Some(JaToken::Short) => { self.advance(); JaType::Short }
+                    Some(JaToken::Identifier(_)) => {
+                        let name = self.parse_qualified_name()?;
+                        if self.match_token(&JaToken::Less) {
+                            let mut type_args = Vec::new();
+                            type_args.push(self.parse_type()?);
+                            while self.match_token(&JaToken::Comma) {
+                                type_args.push(self.parse_type()?);
+                            }
+                            self.consume(&JaToken::Greater, "generic closing >")?;
+                            JaType::Generic { base: name, type_args }
+                        } else {
+                            JaType::Class(name)
+                        }
+                    }
+                    _ => return Err(format!("Expected type after new, got: {:?}", self.peek())),
+                };
+
+                if self.match_token(&JaToken::LBracket) {
+                    let mut dimensions = Vec::new();
+                    if !self.check(&JaToken::RBracket) {
+                        dimensions.push(Some(self.parse_expr()?));
+                    } else {
+                        dimensions.push(None);
+                    }
+                    self.consume(&JaToken::RBracket, "closing bracket in array alloc")?;
+                    
+                    // Allow multi-dimensional empty brackets logically
+                    while self.match_token(&JaToken::LBracket) {
+                        self.consume(&JaToken::RBracket, "closing bracket empty dimension in array alloc")?;
+                        dimensions.push(None);
+                    }
+                    
+                    JaExpr::NewArray { ty, dimensions, init: None }
+                } else if self.match_token(&JaToken::LParen) {
+                    let mut args = Vec::new();
+                    if !self.check(&JaToken::RParen) {
+                        args.push(self.parse_expr()?);
+                        while self.match_token(&JaToken::Comma) {
+                            args.push(self.parse_expr()?);
+                        }
+                    }
+                    self.consume(&JaToken::RParen, "closing paren obj alloc")?;
+                    JaExpr::NewObject { ty, args, body: None }
+                } else {
+                    return Err("Expected [ or ( after new".to_string());
+                }
+            }
             Some(JaToken::Identifier(_)) => {
                 let name = self.parse_identifier()?;
                 if self.match_token(&JaToken::LParen) {
@@ -736,21 +796,29 @@ impl JaParser {
             _ => return Err(format!("Unimplemented expression parsing at {:?}", self.peek()))
         };
 
-        // Handle . field accesses or method calls
-        while self.match_token(&JaToken::Dot) {
-            let field_or_method = self.parse_identifier()?;
-            if self.match_token(&JaToken::LParen) {
-                let mut args = Vec::new();
-                if !self.check(&JaToken::RParen) {
-                    args.push(self.parse_expr()?);
-                    while self.match_token(&JaToken::Comma) {
+        // Handle suffix operators `.`, method calls `()`, and array indexes `[]`
+        loop {
+            if self.match_token(&JaToken::Dot) {
+                let field_or_method = self.parse_identifier()?;
+                if self.match_token(&JaToken::LParen) {
+                    let mut args = Vec::new();
+                    if !self.check(&JaToken::RParen) {
                         args.push(self.parse_expr()?);
+                        while self.match_token(&JaToken::Comma) {
+                            args.push(self.parse_expr()?);
+                        }
                     }
+                    self.consume(&JaToken::RParen, "end of method args")?;
+                    expr = JaExpr::MethodCall { target: Some(Box::new(expr)), name: field_or_method, type_args: vec![], args };
+                } else {
+                    expr = JaExpr::FieldAccess { target: Box::new(expr), field: field_or_method };
                 }
-                self.consume(&JaToken::RParen, "end of method args")?;
-                expr = JaExpr::MethodCall { target: Some(Box::new(expr)), name: field_or_method, type_args: vec![], args };
+            } else if self.match_token(&JaToken::LBracket) {
+                let index = self.parse_expr()?;
+                self.consume(&JaToken::RBracket, "closing bracket in array access")?;
+                expr = JaExpr::ArrayAccess { array: Box::new(expr), index: Box::new(index) };
             } else {
-                expr = JaExpr::FieldAccess { target: Box::new(expr), field: field_or_method };
+                break;
             }
         }
 
