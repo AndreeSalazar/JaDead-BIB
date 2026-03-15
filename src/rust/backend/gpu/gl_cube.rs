@@ -496,9 +496,6 @@ pub extern "C" fn jdb_gl_create_cube() -> i64 {
 pub extern "C" fn jdb_gl_use_shader(program: i64) -> i64 {
     #[cfg(target_os = "windows")]
     unsafe {
-        if DRAW_FRAME_COUNT == 0 {
-            eprintln!("🔍 [GL:Cube] useShader program={}", program);
-        }
         if GL_FUNCS.use_program.is_some() {
             GL_FUNCS.use_program.unwrap()(program as u32);
         }
@@ -517,16 +514,9 @@ pub extern "C" fn jdb_gl_set_uniform_mvp(program: i64, angle: i64) -> i64 {
         if GL_FUNCS.get_uniform_location.is_some() && GL_FUNCS.uniform_matrix4fv.is_some() {
             let mvp_name = CString::new("MVP").unwrap();
             let loc = GL_FUNCS.get_uniform_location.unwrap()(program as u32, mvp_name.as_ptr());
-            let mvp = compute_mvp(angle as f32);
-            if DRAW_FRAME_COUNT == 0 {
-                eprintln!("🔍 [GL:MVP] uniform loc={}, angle={}, program={}", loc, angle, program);
-                eprintln!("🔍 [GL:MVP] m[0..4]=[{:.3},{:.3},{:.3},{:.3}]", mvp[0], mvp[1], mvp[2], mvp[3]);
-                eprintln!("🔍 [GL:MVP] m[4..8]=[{:.3},{:.3},{:.3},{:.3}]", mvp[4], mvp[5], mvp[6], mvp[7]);
-                eprintln!("🔍 [GL:MVP] m[8..12]=[{:.3},{:.3},{:.3},{:.3}]", mvp[8], mvp[9], mvp[10], mvp[11]);
-                eprintln!("🔍 [GL:MVP] m[12..16]=[{:.3},{:.3},{:.3},{:.3}]", mvp[12], mvp[13], mvp[14], mvp[15]);
-            }
             if loc >= 0 {
-                GL_FUNCS.uniform_matrix4fv.unwrap()(loc, 1, 0, mvp.as_ptr()); // GL_FALSE: data already column-major
+                let mvp = compute_mvp(angle as f32);
+                GL_FUNCS.uniform_matrix4fv.unwrap()(loc, 1, 0, mvp.as_ptr());
             }
         }
         1
@@ -552,8 +542,6 @@ pub extern "C" fn jdb_gl_clear_depth(r: i64, g: i64, b: i64) -> i64 {
     { let _ = (r, g, b); 1 }
 }
 
-static mut DRAW_FRAME_COUNT: u32 = 0;
-
 /// Draw the cube (bind VAO, draw 36 vertices as triangles)
 #[no_mangle]
 pub extern "C" fn jdb_gl_draw_cube(vao: i64) -> i64 {
@@ -562,19 +550,6 @@ pub extern "C" fn jdb_gl_draw_cube(vao: i64) -> i64 {
         if GL_FUNCS.bind_vertex_array.is_some() && GL_FUNCS.draw_arrays.is_some() {
             GL_FUNCS.bind_vertex_array.unwrap()(vao as u32);
             GL_FUNCS.draw_arrays.unwrap()(GL_TRIANGLES, 0, 36);
-
-            // Debug: check glGetError on first few frames
-            if DRAW_FRAME_COUNT < 3 || DRAW_FRAME_COUNT == 100 {
-                let ctx = super::opengl::get_ctx_pub();
-                let err_proc = load_gl_func(ctx.dll_handle, "glGetError");
-                if err_proc != 0 {
-                    let gl_get_error: extern "system" fn() -> u32 = std::mem::transmute(err_proc);
-                    let err = gl_get_error();
-                    eprintln!("🔍 [GL:Cube] frame={} vao={} err=0x{:04X}", DRAW_FRAME_COUNT, vao, err);
-                }
-            }
-            DRAW_FRAME_COUNT += 1;
-
             GL_FUNCS.bind_vertex_array.unwrap()(0);
         }
         1
