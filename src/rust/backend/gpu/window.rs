@@ -49,6 +49,10 @@ fn get_win() -> &'static mut NativeWindow {
     }
 }
 
+pub fn get_win_pub() -> &'static mut NativeWindow {
+    get_win()
+}
+
 // ── Win32 constants ─────────────────────────────────────────
 #[cfg(target_os = "windows")]
 const WS_OVERLAPPEDWINDOW: u32 = 0x00CF0000;

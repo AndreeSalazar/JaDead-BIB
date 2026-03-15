@@ -383,6 +383,12 @@ impl ISATranslator {
                     "jdb_dx12_present" => crate::backend::gpu::dx12_cube::jdb_dx12_present as *const () as u64,
                     "jdb_dx12_destroy_mesh" => crate::backend::gpu::dx12_cube::jdb_dx12_destroy_mesh as *const () as u64,
                     "jdb_dx12_destroy_pso" => crate::backend::gpu::dx12_cube::jdb_dx12_destroy_pso as *const () as u64,
+                    "jdb_dx12_create_cbv" => crate::backend::gpu::dx12_cube::jdb_dx12_create_cbv as *const () as u64,
+                    "jdb_dx12_update_mvp" => crate::backend::gpu::dx12_cube::jdb_dx12_update_mvp as *const () as u64,
+                    "jdb_dx12_clear_rtv" => crate::backend::gpu::dx12_cube::jdb_dx12_clear_rtv as *const () as u64,
+                    "jdb_dx12_set_cbv" => crate::backend::gpu::dx12_cube::jdb_dx12_set_cbv as *const () as u64,
+                    "jdb_dx12_draw" => crate::backend::gpu::dx12_cube::jdb_dx12_draw as *const () as u64,
+                    "jdb_dx12_end_frame" => crate::backend::gpu::dx12_cube::jdb_dx12_end_frame as *const () as u64,
                     // Window
                     "jdb_window_create" => crate::backend::gpu::window::jdb_window_create as *const () as u64,
                     "jdb_window_destroy" => crate::backend::gpu::window::jdb_window_destroy as *const () as u64,

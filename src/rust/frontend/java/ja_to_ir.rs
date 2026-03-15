@@ -849,6 +849,12 @@ impl JaToIrGenerator {
                             ("DirectX12", "present")       => Some("jdb_dx12_present"),
                             ("DirectX12", "destroyMesh")   => Some("jdb_dx12_destroy_mesh"),
                             ("DirectX12", "destroyPSO")    => Some("jdb_dx12_destroy_pso"),
+                            ("DirectX12", "createCBV")     => Some("jdb_dx12_create_cbv"),
+                            ("DirectX12", "updateMVP")     => Some("jdb_dx12_update_mvp"),
+                            ("DirectX12", "clearRTV")      => Some("jdb_dx12_clear_rtv"),
+                            ("DirectX12", "setCBV")        => Some("jdb_dx12_set_cbv"),
+                            ("DirectX12", "draw")          => Some("jdb_dx12_draw"),
+                            ("DirectX12", "endFrame")      => Some("jdb_dx12_end_frame"),
                             // Graphics (window + auto-detect)
                             ("Graphics", "createWindow")     => Some("jdb_window_create"),
                             ("Graphics", "destroyWindow")    => Some("jdb_window_destroy"),

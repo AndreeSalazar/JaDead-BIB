@@ -13,9 +13,11 @@ use std::ffi::CString;
 /// DX12 context holding DLL handles and device
 pub struct DX12Context {
     #[cfg(target_os = "windows")]
-    d3d12_handle: usize,
+    pub d3d12_handle: usize,
     #[cfg(target_os = "windows")]
-    dxgi_handle: usize,
+    pub dxgi_handle: usize,
+    #[cfg(target_os = "windows")]
+    pub device: usize,
     pub initialized: bool,
     pub feature_level: u32,
     pub adapter_name: String,
@@ -28,6 +30,8 @@ impl DX12Context {
             d3d12_handle: 0,
             #[cfg(target_os = "windows")]
             dxgi_handle: 0,
+            #[cfg(target_os = "windows")]
+            device: 0,
             initialized: false,
             feature_level: 0,
             adapter_name: String::new(),
@@ -45,6 +49,10 @@ fn get_ctx() -> &'static mut DX12Context {
         }
         DX12_CTX.as_mut().unwrap()
     }
+}
+
+pub fn get_ctx_pub() -> &'static mut DX12Context {
+    get_ctx()
 }
 
 // ── DX12 constants ──────────────────────────────────────────
@@ -143,12 +151,9 @@ pub extern "C" fn jdb_dx12_get_feature_level() -> i64 {
                 // Success! Feature level 12.0 supported
                 ctx.feature_level = D3D_FEATURE_LEVEL_12_0;
 
-                // Release the device if we got one
+                // Keep the device alive for dx12_cube.rs to reuse
                 if device != 0 {
-                    // Call IUnknown::Release (vtable index 2)
-                    let vtable = *(device as *const *const usize);
-                    let release: extern "system" fn(usize) -> u32 = std::mem::transmute(*vtable.add(2));
-                    release(device);
+                    ctx.device = device;
                 }
 
                 eprintln!("✅ [GPU:DX12] Feature Level: 12_0 (0x{:X})", D3D_FEATURE_LEVEL_12_0);
