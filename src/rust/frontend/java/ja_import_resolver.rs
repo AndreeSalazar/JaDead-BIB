@@ -31,6 +31,16 @@ impl JaImportResolver {
         // FastOS specific extensions
         mappings.insert("fastos.gpu.Compute".to_string(), "deadbib.gpu.CudaDispatch".to_string());
 
+        // GPU API — Native DLL dispatch (sin JVM, sin JNI)
+        mappings.insert("gpu.OpenGL".to_string(),    "deadbib.gpu.OpenGL".to_string());
+        mappings.insert("gpu.Vulkan".to_string(),    "deadbib.gpu.Vulkan".to_string());
+        mappings.insert("gpu.DirectX12".to_string(), "deadbib.gpu.DX12".to_string());
+        mappings.insert("gpu.Graphics".to_string(),  "deadbib.gpu.Auto".to_string());
+        mappings.insert("gpu.CUDA".to_string(),      "deadbib.gpu.CUDA".to_string());
+
+        // java.lang.Math
+        mappings.insert("java.lang.Math".to_string(), "deadbib.math.NativeMath".to_string());
+
         Self {
             native_mappings: mappings,
         }

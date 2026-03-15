@@ -174,29 +174,44 @@ pub enum IRInstruction {
     GlobalLoad(String),             // MOV RAX, [__global_name] from .data
     GlobalStore(String),            // MOV [__global_name], RAX to .data
 
-    // v4.0 — GPU Dispatch (FASE 4)
-    GpuInit,                                            // cuInit(0) via nvcuda.dll
-    GpuDeviceGet,                                       // cuDeviceGet(&dev, 0)
-    GpuCtxCreate,                                       // cuCtxCreate(&ctx, 0, dev)
-    GpuMalloc { size: Box<IRInstruction> },             // cuMemAlloc(&dptr, size)
-    GpuMemcpyHtoD { dst: String, src: String, size: Box<IRInstruction> }, // cuMemcpyHtoD
-    GpuMemcpyDtoH { dst: String, src: String, size: Box<IRInstruction> }, // cuMemcpyDtoH
-    GpuLaunch { kernel: String, args: Vec<IRInstruction> },              // cuLaunchKernel
-    GpuFree { ptr: String },                            // cuMemFree(dptr)
-    GpuCtxDestroy,                                      // cuCtxDestroy(ctx)
-    GpuAvxToCuda { avx_label: String, gpu_ptr: String, count: Box<IRInstruction> }, // AVX2→CUDA handoff
+    // v5.0 — Unified GPU Dispatch (OpenGL + Vulkan + DX12 + CUDA)
+    GpuInitBackend { backend: GpuBackend },              // init chosen backend
+    GpuGetVersion { backend: GpuBackend },               // query API version
+    GpuGetDevice { backend: GpuBackend },                // enumerate device/adapter
+    GpuAllocBuffer { backend: GpuBackend, size: Box<IRInstruction> },
+    GpuWriteBuffer { backend: GpuBackend, buf: String, data: String },
+    GpuReadBuffer { backend: GpuBackend, buf: String },
+    GpuFreeBuffer { backend: GpuBackend, buf: String },
+    GpuShaderLoad { backend: GpuBackend, path: String },
+    GpuDispatchCompute { backend: GpuBackend, x: u32, y: u32, z: u32 },
+    GpuPresent { backend: GpuBackend },
+    GpuClear { backend: GpuBackend, r: f32, g: f32, b: f32, a: f32 },
+    GpuDestroyBackend { backend: GpuBackend },
+    GpuDetectBest,                                       // auto-detect best available
 
-    // v4.0 — Vulkan/SPIR-V Dispatch
-    VkInit,                                             // vkCreateInstance
-    VkDeviceGet,                                        // vkEnumeratePhysicalDevices
-    VkDeviceCreate,                                     // vkCreateDevice + queue
-    VkBufferCreate { size: Box<IRInstruction> },        // vkCreateBuffer + vkAllocateMemory
-    VkBufferWrite { dst: String, src: String, size: Box<IRInstruction> },  // vkMapMemory + memcpy
-    VkBufferRead { dst: String, src: String, size: Box<IRInstruction> },   // vkMapMemory read back
-    VkShaderLoad { spirv_path: String },                // vkCreateShaderModule from SPIR-V
-    VkDispatch { shader: String, x: Box<IRInstruction>, y: Box<IRInstruction>, z: Box<IRInstruction> }, // vkCmdDispatch
-    VkBufferFree { ptr: String },                       // vkFreeMemory + vkDestroyBuffer
-    VkDestroy,                                          // vkDestroyDevice + vkDestroyInstance
+    // v4.0 legacy — CUDA specific (kept for backward compat)
+    GpuInit,
+    GpuDeviceGet,
+    GpuCtxCreate,
+    GpuMalloc { size: Box<IRInstruction> },
+    GpuMemcpyHtoD { dst: String, src: String, size: Box<IRInstruction> },
+    GpuMemcpyDtoH { dst: String, src: String, size: Box<IRInstruction> },
+    GpuLaunch { kernel: String, args: Vec<IRInstruction> },
+    GpuFree { ptr: String },
+    GpuCtxDestroy,
+    GpuAvxToCuda { avx_label: String, gpu_ptr: String, count: Box<IRInstruction> },
+
+    // v4.0 legacy — Vulkan/SPIR-V (kept for backward compat)
+    VkInit,
+    VkDeviceGet,
+    VkDeviceCreate,
+    VkBufferCreate { size: Box<IRInstruction> },
+    VkBufferWrite { dst: String, src: String, size: Box<IRInstruction> },
+    VkBufferRead { dst: String, src: String, size: Box<IRInstruction> },
+    VkShaderLoad { spirv_path: String },
+    VkDispatch { shader: String, x: Box<IRInstruction>, y: Box<IRInstruction>, z: Box<IRInstruction> },
+    VkBufferFree { ptr: String },
+    VkDestroy,
 
     // Array operations
     AllocArray { ir_type: IRType, count: Box<IRInstruction> },
@@ -233,6 +248,28 @@ pub enum IRInstruction {
 
     // No-op
     Nop,
+}
+
+/// GPU Backend selector for unified GPU dispatch
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GpuBackend {
+    OpenGL,     // opengl32.dll
+    Vulkan,     // vulkan-1.dll
+    DX12,       // d3d12.dll + dxgi.dll
+    CUDA,       // nvcuda.dll
+    Auto,       // detect best available at runtime
+}
+
+impl std::fmt::Display for GpuBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuBackend::OpenGL => write!(f, "OpenGL"),
+            GpuBackend::Vulkan => write!(f, "Vulkan"),
+            GpuBackend::DX12 => write!(f, "DirectX12"),
+            GpuBackend::CUDA => write!(f, "CUDA"),
+            GpuBackend::Auto => write!(f, "Auto"),
+        }
+    }
 }
 
 /// Constant value in IR
