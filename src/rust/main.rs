@@ -62,7 +62,9 @@ fn main() {
         print_header();
     }
 
-    let start_time = Instant::now();
+    println!("  {C_TEXT}Source:{C_RESET}   {}", file_path);
+    println!("  {C_TEXT}Language:{C_RESET} Java 21");
+    println!();
 
     // LECTURA DEL CÓDIGO FUENTE
     let source = fs::read_to_string(file_path).unwrap_or_else(|_| {
@@ -70,12 +72,20 @@ fn main() {
         process::exit(1);
     });
 
-    println!("  {C_TEXT}Source:{C_RESET}   {}", file_path);
-    println!("  {C_TEXT}Language:{C_RESET} Java 21");
-    println!();
+    let mut step_logs = String::with_capacity(4096);
+    macro_rules! s_print {
+        ($($arg:tt)*) => {
+            if is_step_mode {
+                use std::fmt::Write;
+                let _ = writeln!(&mut step_logs, $($arg)*);
+            }
+        };
+    }
+
+    let start_time = Instant::now();
 
     // FASE 01: PREPROCESSOR
-    if is_step_mode { println!("{C_PHASE}--- Phase 01: PREPROCESSOR ---{C_RESET}"); }
+    s_print!("{C_PHASE}--- Phase 01: PREPROCESSOR ---{C_RESET}");
     let mut preprocessor = JaPreprocessor::new(&source);
     let processed_source = match preprocessor.process() {
         Ok(s) => s,
@@ -84,20 +94,16 @@ fn main() {
             process::exit(1);
         }
     };
-    if is_step_mode {
-        println!("{C_DIM}[PREPROC]  Directivas y limpieza aplicadas{C_RESET}");
-    }
+    s_print!("{C_DIM}[PREPROC]  Directivas y limpieza aplicadas{C_RESET}");
 
     // FASE 03: LEXER
-    if is_step_mode { println!("{C_PHASE}--- Phase 03: LEXER ---{C_RESET}"); }
+    s_print!("{C_PHASE}--- Phase 03: LEXER ---{C_RESET}");
     let mut lexer = JaLexer::new(&processed_source);
     let tokens = lexer.tokenize();
-    if is_step_mode {
-        println!("{C_DIM}[LEXER]    {} tokens generados{C_RESET}", tokens.len());
-    }
+    s_print!("{C_DIM}[LEXER]    {} tokens generados{C_RESET}", tokens.len());
 
     // FASE 04: PARSER (AST)
-    if is_step_mode { println!("{C_PHASE}--- Phase 04: PARSER ---{C_RESET}"); }
+    s_print!("{C_PHASE}--- Phase 04: PARSER ---{C_RESET}");
     let reset_lexer = JaLexer::new(&processed_source);
     let mut parser = JaParser::new(reset_lexer);
     let mut ast = match parser.parse_compilation_unit() {
@@ -107,34 +113,28 @@ fn main() {
             process::exit(1);
         }
     };
-    if is_step_mode {
-        println!("[PARSER]   {} declaraciones de nivel superior analizadas", ast.declarations.len());
-    }
+    s_print!("[PARSER]   {} declaraciones de nivel superior analizadas", ast.declarations.len());
 
     // FASE 04.5: IMPORT RESOLVER
-    if is_step_mode { println!("\n--- Phase 04.5: IMPORT RESOLVER ---"); }
+    s_print!("\n--- Phase 04.5: IMPORT RESOLVER ---");
     let import_resolver = JaImportResolver::new();
     if let Err(e) = import_resolver.resolve_imports(&mut ast) {
         eprintln!("Error Resolviendo Imports:\n{}", e);
         process::exit(1);
     }
-    if is_step_mode {
-        println!("[IMPORTS]  Librería Estándar API mapeada a FastOS.bib Nativo");
-    }
+    s_print!("[IMPORTS]  Librería Estándar API mapeada a FastOS.bib Nativo");
 
     // FASE 04.8: UB DETECTOR (Seguridad de Java adelantada a Tiempo de Compilación)
-    if is_step_mode { println!("\n{C_PHASE}--- Phase 04.8: UB DETECTOR ---{C_RESET}"); }
+    s_print!("\n{C_PHASE}--- Phase 04.8: UB DETECTOR ---{C_RESET}");
     let mut ub_detector = UbDetector::new();
     let warnings = ub_detector.analyze(&ast);
     for warn in &warnings {
-        println!("{C_WARN}⚠️  [UB-WARN] {:?}: {}{C_RESET}", warn.ub_type, warn.message);
+        s_print!("{C_WARN}⚠️  [UB-WARN] {:?}: {}{C_RESET}", warn.ub_type, warn.message);
     }
-    if is_step_mode {
-        println!("{C_DIM}[UB-DETECT] Analizado para 15+ tipos de comportamiento indefinido (Warns: {}){C_RESET}", warnings.len());
-    }
+    s_print!("{C_DIM}[UB-DETECT] Analizado para 15+ tipos de comportamiento indefinido (Warns: {}){C_RESET}", warnings.len());
 
     // FASE 05 & 06: TYPE CHECKER + IR GENERATION (ADeadOp)
-    if is_step_mode { println!("\n{C_PHASE}--- Phase 06: IR (ADeadOp SSA-form) + GC PLUS ENGINE ---{C_RESET}"); }
+    s_print!("\n{C_PHASE}--- Phase 06: IR (ADeadOp SSA-form) + GC PLUS ENGINE ---{C_RESET}");
     let mut ir_generator = JaToIrGenerator::new();
     let module = match ir_generator.generate(&ast) {
         Ok(m) => m,
@@ -144,19 +144,17 @@ fn main() {
         }
     };
 
-    if is_step_mode {
-        println!("{C_GCPLUS}[GC+] Scope Tracker:      {C_OK}ACTIVO (Zero-Pause Deterministic Free){C_RESET}");
-        println!("{C_GCPLUS}[GC+] Loop Anticipator:   {C_OK}ACTIVO (Object Pools Pre-Allocated){C_RESET}");
-        println!("{C_GCPLUS}[GC+] Escape Detector:    {C_OK}ACTIVO (Nativo Out-Of-Bounds Checks){C_RESET}");
-        println!("{C_GCPLUS}[GC+] Region Memory:      {C_OK}ACTIVO (App_Root_Region){C_RESET}");
-        println!("{C_GCPLUS}[GC+] Cycle Breaker:      {C_OK}ACTIVO (Strict Mode){C_RESET}\n");
-        println!("{C_DIM}[IR]  {} module generado{C_RESET}", module.name);
-        println!("{C_DIM}[IR]  Tipos estáticos Java validados y mapeados a nativo{C_RESET}");
-        println!("{C_DIM}[IR]  JVM eliminado — machine code listo para backend ✓{C_RESET}");
-    }
+    s_print!("{C_GCPLUS}[GC+] Scope Tracker:      {C_OK}ACTIVO (Zero-Pause Deterministic Free){C_RESET}");
+    s_print!("{C_GCPLUS}[GC+] Loop Anticipator:   {C_OK}ACTIVO (Object Pools Pre-Allocated){C_RESET}");
+    s_print!("{C_GCPLUS}[GC+] Escape Detector:    {C_OK}ACTIVO (Nativo Out-Of-Bounds Checks){C_RESET}");
+    s_print!("{C_GCPLUS}[GC+] Region Memory:      {C_OK}ACTIVO (App_Root_Region){C_RESET}");
+    s_print!("{C_GCPLUS}[GC+] Cycle Breaker:      {C_OK}ACTIVO (Strict Mode){C_RESET}\n");
+    s_print!("{C_DIM}[IR]  {} module generado{C_RESET}", module.name);
+    s_print!("{C_DIM}[IR]  Tipos estáticos Java validados y mapeados a nativo{C_RESET}");
+    s_print!("{C_DIM}[IR]  JVM eliminado — machine code listo para backend ✓{C_RESET}");
 
     // FASE 07: ISA TRANSLATION (ADeadOp IR -> x86-64 Machine Code)
-    if is_step_mode { println!("\n--- Phase 07: BACKEND (x86-64 ISA) ---"); }
+    s_print!("\n--- Phase 07: BACKEND (x86-64 ISA) ---");
     let mut translator = ISATranslator::new();
     let machine_code = match translator.translate(&module) {
         Ok(c) => c,
@@ -165,9 +163,7 @@ fn main() {
             process::exit(1);
         }
     };
-    if is_step_mode {
-        println!("[ISA]      Código máquina generado ({} bytes)", machine_code.len());
-    }
+    s_print!("[ISA]      Código máquina generado ({} bytes)", machine_code.len());
 
     if mode == "java" {
         // FASE 08: LINKING & EXPORT (.exe PE Nativo WIndows)
@@ -189,10 +185,15 @@ fn main() {
         let source_hash = hash_source(&source);
         let jit = JitExecutor::new(machine_code, vec![], source_hash);
         
-        println!("{C_PHASE}--- RUNTIME: JIT 2.0 IN-MEMORY ---{C_RESET}");
+        // Ejecución (Evitar printing I/O slow mid-execution)
         let exec_result = jit.execute_with_stats();
         let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
         
+        if is_step_mode {
+            print!("{}", step_logs);
+            println!("{C_PHASE}--- RUNTIME: JIT 2.0 IN-MEMORY ---{C_RESET}");
+        }
+
         match exec_result {
             Ok((code, stats)) => {
                 println!("{C_DIM}[JIT 2.0]{C_RESET} {C_TEXT}alloc{C_RESET}:   {:.4}ms (.text RWX, .data RW)", stats.alloc_ms);

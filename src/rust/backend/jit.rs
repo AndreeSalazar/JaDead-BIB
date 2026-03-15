@@ -27,6 +27,10 @@ struct CacheEntry {
 static THERMAL_CACHE: std::sync::LazyLock<Mutex<HashMap<u64, CacheEntry>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+pub static CPU_FEATURES: std::sync::LazyLock<CpuFeatures> = std::sync::LazyLock::new(|| {
+    JitExecutor::detect_cpu_features()
+});
+
 /// Hashes Java Source to identify it uniquely
 pub fn hash_source(source: &str) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
@@ -149,7 +153,7 @@ impl JitExecutor {
     /// Executable Memory Engine (Windows Implementations)
     #[cfg(target_os = "windows")]
     pub fn execute_with_stats(&self) -> Result<(i32, JitStats), String> {
-        let _cpu = Self::detect_cpu_features();
+        let _cpu = &*CPU_FEATURES;
         // THERMAL CACHE LOOKUP
         if let Ok(mut cache) = THERMAL_CACHE.lock() {
             if cache.contains_key(&self.source_hash) {
