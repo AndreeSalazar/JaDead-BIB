@@ -11,7 +11,7 @@ use frontend::java::ja_import_resolver::JaImportResolver;
 use middle::ub_detector::UbDetector;
 use backend::isa::ISATranslator;
 use backend::pe::PeExporter;
-use backend::jit::{JitExecutor, hash_source};
+use backend::jit::{JitExecutor, hash_source, jdb_flush_prints};
 
 use std::env;
 use std::fs;
@@ -188,6 +188,11 @@ fn main() {
         // Ejecución (Evitar printing I/O slow mid-execution)
         let exec_result = jit.execute_with_stats();
         let total_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+        
+        let out_buf = jdb_flush_prints();
+        if !out_buf.is_empty() {
+            print!("{}", out_buf);
+        }
         
         if is_step_mode {
             print!("{}", step_logs);

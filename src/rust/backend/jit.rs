@@ -41,17 +41,35 @@ pub fn hash_source(source: &str) -> u64 {
     h
 }
 
+static PRINT_BUFFER: std::sync::LazyLock<Mutex<String>> = std::sync::LazyLock::new(|| Mutex::new(String::with_capacity(8192)));
+
+pub fn jdb_flush_prints() -> String {
+    if let Ok(mut buf) = PRINT_BUFFER.lock() {
+        let rv = buf.clone();
+        buf.clear();
+        rv
+    } else {
+        String::new()
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn jdb_print_str(ptr: *const u8, len: u32) {
     let slice = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     if let Ok(s) = std::str::from_utf8(slice) {
-        println!("{}", s);
+        if let Ok(mut buf) = PRINT_BUFFER.lock() {
+            buf.push_str(s);
+            buf.push('\n');
+        }
     }
 }
 
 #[no_mangle]
 pub extern "C" fn jdb_print_int(val: i64) {
-    println!("{}", val);
+    if let Ok(mut buf) = PRINT_BUFFER.lock() {
+        use std::fmt::Write;
+        let _ = writeln!(buf, "{}", val);
+    }
 }
 
 #[derive(Debug, Clone)]
