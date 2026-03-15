@@ -12,7 +12,7 @@ use std::ffi::CString;
 /// OpenGL function pointers loaded at runtime
 pub struct OpenGLContext {
     #[cfg(target_os = "windows")]
-    dll_handle: usize,
+    pub dll_handle: usize,
     pub initialized: bool,
     pub version_string: String,
 }
@@ -38,6 +38,10 @@ fn get_ctx() -> &'static mut OpenGLContext {
         }
         GL_CTX.as_mut().unwrap()
     }
+}
+
+pub fn get_ctx_pub() -> &'static mut OpenGLContext {
+    get_ctx()
 }
 
 // ── OpenGL constants ────────────────────────────────────────

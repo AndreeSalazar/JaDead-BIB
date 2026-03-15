@@ -13,11 +13,11 @@ use std::ffi::CString;
 /// Vulkan context holding DLL handle and instance
 pub struct VulkanContext {
     #[cfg(target_os = "windows")]
-    dll_handle: usize,
+    pub dll_handle: usize,
     pub initialized: bool,
     pub api_version: u32,
     pub device_name: String,
-    vk_instance: u64,
+    pub vk_instance: u64,
 }
 
 impl VulkanContext {
@@ -43,6 +43,10 @@ fn get_ctx() -> &'static mut VulkanContext {
         }
         VK_CTX.as_mut().unwrap()
     }
+}
+
+pub fn get_ctx_pub() -> &'static mut VulkanContext {
+    get_ctx()
 }
 
 // ── Vulkan constants ────────────────────────────────────────
