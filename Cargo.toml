@@ -1,0 +1,16 @@
+﻿[package]
+name = "jab"
+version = "0.1.0"
+edition = "2021"
+authors = ["Eddi Andreé Salazar Matos"]
+description = "JaDead-BIB: Java nativo, sin JVM, sin GC"
+
+[[bin]]
+name = "jab"
+path = "src/rust/main.rs"
+
+[lib]
+name = "jadead_bib"
+path = "src/rust/lib.rs"
+
+[dependencies]
