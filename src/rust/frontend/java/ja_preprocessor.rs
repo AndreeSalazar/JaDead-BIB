@@ -28,8 +28,8 @@ impl JaPreprocessor {
 
     /// Removes UTF-8 BOM if present
     fn remove_bom(&mut self) {
-        if self.source.starts_with("\u{FEFF}") {
-            self.source = self.source[3..].to_string();
+        if self.source.starts_with('\u{FEFF}') {
+            self.source = self.source['\u{FEFF}'.len_utf8()..].to_string();
         }
     }
 

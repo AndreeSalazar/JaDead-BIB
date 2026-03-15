@@ -95,7 +95,14 @@ impl UbDetector {
 
     fn analyze_class_member(&mut self, member: &JaClassMember) {
         match member {
-            JaClassMember::Method { body: Some(block), .. } => {
+            JaClassMember::Method { name, body: Some(block), .. } => {
+                // StackOverflow detection: check if method calls itself without a base case
+                if self.detect_unbounded_recursion(name, block) {
+                    self.warnings.push(UBWarning {
+                        ub_type: JavaUB::StackOverflow,
+                        message: format!("Método '{}' parece ser recursivo sin caso base detectable", name),
+                    });
+                }
                 self.analyze_block(block);
             }
             JaClassMember::Constructor { body, .. } => {
@@ -105,6 +112,52 @@ impl UbDetector {
                 self.analyze_block(block);
             }
             _ => {}
+        }
+    }
+
+    fn detect_unbounded_recursion(&self, method_name: &str, block: &JaBlock) -> bool {
+        let mut has_self_call = false;
+        let mut has_base_case = false;
+        for stmt in &block.stmts {
+            self.check_recursion_stmt(method_name, stmt, &mut has_self_call, &mut has_base_case);
+        }
+        has_self_call && !has_base_case
+    }
+
+    fn check_recursion_stmt(&self, method_name: &str, stmt: &JaStmt, has_self_call: &mut bool, has_base_case: &mut bool) {
+        match stmt {
+            JaStmt::If { then_branch, .. } => {
+                // An if statement before the recursive call suggests a base case
+                *has_base_case = true;
+                self.check_recursion_stmt(method_name, then_branch, has_self_call, has_base_case);
+            }
+            JaStmt::Return(_) => {
+                *has_base_case = true;
+            }
+            JaStmt::Expr(e) => {
+                if self.expr_calls_method(e, method_name) {
+                    *has_self_call = true;
+                }
+            }
+            JaStmt::Block(b) => {
+                for s in &b.stmts {
+                    self.check_recursion_stmt(method_name, s, has_self_call, has_base_case);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn expr_calls_method(&self, expr: &JaExpr, name: &str) -> bool {
+        match expr {
+            JaExpr::MethodCall { name: call_name, args, .. } => {
+                if call_name == name { return true; }
+                args.iter().any(|a| self.expr_calls_method(a, name))
+            }
+            JaExpr::Binary { left, right, .. } => {
+                self.expr_calls_method(left, name) || self.expr_calls_method(right, name)
+            }
+            _ => false,
         }
     }
 
@@ -137,7 +190,37 @@ impl UbDetector {
                 self.analyze_expr(cond);
                 self.analyze_stmt(body);
             }
-            // Add remaining statements...
+            JaStmt::DoWhile { body, cond } => {
+                self.analyze_stmt(body);
+                self.analyze_expr(cond);
+            }
+            JaStmt::For { init, cond, update, body } => {
+                if let Some(i) = init { self.analyze_stmt(i); }
+                if let Some(c) = cond { self.analyze_expr(c); }
+                for u in update { self.analyze_expr(u); }
+                self.analyze_stmt(body);
+            }
+            JaStmt::ForEach { iterable, body, .. } => {
+                self.analyze_expr(iterable);
+                self.analyze_stmt(body);
+            }
+            JaStmt::Switch { expr, cases } => {
+                self.analyze_expr(expr);
+                for case in cases {
+                    for label in &case.labels { self.analyze_expr(label); }
+                    for stmt in &case.body { self.analyze_stmt(stmt); }
+                }
+            }
+            JaStmt::Try { body, catches, finally_block, .. } => {
+                self.analyze_block(body);
+                for c in catches { self.analyze_block(&c.body); }
+                if let Some(f) = finally_block { self.analyze_block(f); }
+            }
+            JaStmt::Throw(e) => self.analyze_expr(e),
+            JaStmt::Synchronized { body, lock } => {
+                self.analyze_expr(lock);
+                self.analyze_block(body);
+            }
             _ => {}
         }
     }

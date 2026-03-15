@@ -347,7 +347,150 @@ impl JaToIrGenerator {
                 
                 Ok(())
             }
-            _ => Ok(()) // Stub
+            JaStmt::DoWhile { body, cond } => {
+                let start_label = self.next_label("dowhile_start");
+                let end_label = self.next_label("dowhile_end");
+
+                func.body.push(IRInstruction::Label(start_label.clone()));
+                self.generate_stmt(body, func)?;
+
+                let cond_val = self.generate_expr(cond, func)?;
+                func.body.push(cond_val);
+                // If true, jump back
+                func.body.push(IRInstruction::BranchIfFalse(end_label.clone()));
+                func.body.push(IRInstruction::Jump(start_label));
+                func.body.push(IRInstruction::Label(end_label));
+                Ok(())
+            }
+            JaStmt::ForEach { ty: _, name, iterable, body } => {
+                // Simplified: assume iterable is an array, iterate via index
+                let iter_var = self.next_label("foreach_idx");
+                let start_label = self.next_label("foreach_start");
+                let end_label = self.next_label("foreach_end");
+
+                // int __idx = 0
+                func.body.push(IRInstruction::VarDecl { name: iter_var.clone(), ir_type: IRType::I64 });
+                func.body.push(IRInstruction::LoadConst(IRConstValue::Int(0)));
+                func.body.push(IRInstruction::Store(iter_var.clone()));
+
+                // Declare the element variable
+                func.body.push(IRInstruction::VarDecl { name: name.clone(), ir_type: IRType::I64 });
+
+                func.body.push(IRInstruction::Label(start_label.clone()));
+
+                // if __idx >= array.length, break
+                let arr_ir = self.generate_expr(iterable, func)?;
+                let arr_len = IRInstruction::ArrayLength { array: Box::new(arr_ir.clone()) };
+                func.body.push(IRInstruction::Compare {
+                    op: IRCmpOp::Lt,
+                    left: Box::new(IRInstruction::Load(iter_var.clone())),
+                    right: Box::new(arr_len),
+                });
+                func.body.push(IRInstruction::BranchIfFalse(end_label.clone()));
+
+                // name = array[__idx]
+                let elem = IRInstruction::LoadElement {
+                    array: Box::new(arr_ir),
+                    index: Box::new(IRInstruction::Load(iter_var.clone())),
+                };
+                func.body.push(elem);
+                func.body.push(IRInstruction::Store(name.clone()));
+
+                self.generate_stmt(body, func)?;
+
+                // __idx++
+                func.body.push(IRInstruction::BinOp {
+                    op: IROp::Add,
+                    left: Box::new(IRInstruction::Load(iter_var.clone())),
+                    right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+                });
+                func.body.push(IRInstruction::Store(iter_var));
+
+                func.body.push(IRInstruction::Jump(start_label));
+                func.body.push(IRInstruction::Label(end_label));
+                Ok(())
+            }
+            JaStmt::Break(_) => {
+                func.body.push(IRInstruction::Break);
+                Ok(())
+            }
+            JaStmt::Continue(_) => {
+                func.body.push(IRInstruction::Continue);
+                Ok(())
+            }
+            JaStmt::Throw(expr) => {
+                let val = self.generate_expr(expr, func)?;
+                func.body.push(IRInstruction::Raise { exc_type: "Exception".to_string(), message: Some(Box::new(val)) });
+                Ok(())
+            }
+            JaStmt::Switch { expr, cases } => {
+                let switch_val = self.generate_expr(expr, func)?;
+                let switch_var = self.next_label("switch_val");
+                func.body.push(switch_val);
+                func.body.push(IRInstruction::Store(switch_var.clone()));
+
+                let end_label = self.next_label("switch_end");
+                let mut case_labels = Vec::new();
+
+                for (i, case) in cases.iter().enumerate() {
+                    let case_label = self.next_label(&format!("case_{}", i));
+                    case_labels.push(case_label.clone());
+
+                    if case.labels.is_empty() {
+                        // Default case — will be last fallthrough
+                    } else {
+                        for label_expr in &case.labels {
+                            let label_val = self.generate_expr(label_expr, func)?;
+                            func.body.push(IRInstruction::Compare {
+                                op: IRCmpOp::Eq,
+                                left: Box::new(IRInstruction::Load(switch_var.clone())),
+                                right: Box::new(label_val),
+                            });
+                            func.body.push(IRInstruction::BranchIfFalse(if i + 1 < cases.len() {
+                                self.next_label(&format!("case_next_{}", i))
+                            } else {
+                                end_label.clone()
+                            }));
+                        }
+                    }
+
+                    func.body.push(IRInstruction::Label(case_label));
+                    for stmt in &case.body {
+                        self.generate_stmt(stmt, func)?;
+                    }
+                    if case.is_arrow {
+                        func.body.push(IRInstruction::Jump(end_label.clone()));
+                    }
+                }
+                func.body.push(IRInstruction::Label(end_label));
+                Ok(())
+            }
+            JaStmt::Try { body, catches, finally_block, .. } => {
+                let handler_label = self.next_label("catch_handler");
+                let end_label = self.next_label("try_end");
+
+                func.body.push(IRInstruction::TryBegin(handler_label.clone()));
+                self.generate_block(body, func)?;
+                func.body.push(IRInstruction::TryEnd);
+                func.body.push(IRInstruction::Jump(end_label.clone()));
+
+                func.body.push(IRInstruction::Label(handler_label));
+                for catch in catches {
+                    self.generate_block(&catch.body, func)?;
+                }
+                func.body.push(IRInstruction::ClearError);
+
+                if let Some(fin) = finally_block {
+                    func.body.push(IRInstruction::FinallyBegin);
+                    self.generate_block(fin, func)?;
+                    func.body.push(IRInstruction::FinallyEnd);
+                }
+
+                func.body.push(IRInstruction::Label(end_label));
+                Ok(())
+            }
+            JaStmt::Empty => Ok(()),
+            _ => Ok(())
         }
     }
 
@@ -356,9 +499,13 @@ impl JaToIrGenerator {
     fn generate_expr(&mut self, expr: &JaExpr, func: &mut IRFunction) -> Result<IRInstruction, String> {
         match expr {
             JaExpr::IntLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Int(*v))),
+            JaExpr::LongLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Int(*v))),
             JaExpr::FloatLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Float(*v))),
+            JaExpr::DoubleLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Float(*v))),
+            JaExpr::CharLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Int(*v as i64))),
             JaExpr::BooleanLiteral(v) => Ok(IRInstruction::LoadConst(IRConstValue::Bool(*v))),
             JaExpr::StringLiteral(v) => Ok(IRInstruction::LoadString(v.clone())),
+            JaExpr::Null => Ok(IRInstruction::LoadConst(IRConstValue::Int(0))),
             JaExpr::Name(n) => Ok(IRInstruction::Load(n.clone())),
             JaExpr::NewArray { ty, dimensions, .. } => {
                 let ir_type = self.type_checker.resolve_type(ty)?;
@@ -514,26 +661,76 @@ impl JaToIrGenerator {
                     _ => Err(format!("Unsupported binary op {:?}", op))
                 }
             }
-            JaExpr::Unary { op, expr, is_postfix: _ } => {
+            JaExpr::Unary { op, expr, is_postfix } => {
                 match op {
                     JaUnaryOp::Inc => {
                         if let JaExpr::Name(n) = &**expr {
-                            let add = IRInstruction::BinOp { 
-                                op: IROp::Add, 
-                                left: Box::new(IRInstruction::Load(n.clone())), 
-                                right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))) 
-                            };
-                            func.body.push(add);
-                            Ok(IRInstruction::Store(n.clone()))
+                            if *is_postfix {
+                                // Return old value, then increment
+                                let old_val = IRInstruction::Load(n.clone());
+                                func.body.push(IRInstruction::BinOp {
+                                    op: IROp::Add,
+                                    left: Box::new(IRInstruction::Load(n.clone())),
+                                    right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+                                });
+                                func.body.push(IRInstruction::Store(n.clone()));
+                                Ok(old_val)
+                            } else {
+                                let add = IRInstruction::BinOp {
+                                    op: IROp::Add,
+                                    left: Box::new(IRInstruction::Load(n.clone())),
+                                    right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+                                };
+                                func.body.push(add);
+                                Ok(IRInstruction::Store(n.clone()))
+                            }
                         } else {
                             Err("Unsupported inc target".to_string())
+                        }
+                    }
+                    JaUnaryOp::Dec => {
+                        if let JaExpr::Name(n) = &**expr {
+                            if *is_postfix {
+                                let old_val = IRInstruction::Load(n.clone());
+                                func.body.push(IRInstruction::BinOp {
+                                    op: IROp::Sub,
+                                    left: Box::new(IRInstruction::Load(n.clone())),
+                                    right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+                                });
+                                func.body.push(IRInstruction::Store(n.clone()));
+                                Ok(old_val)
+                            } else {
+                                let sub = IRInstruction::BinOp {
+                                    op: IROp::Sub,
+                                    left: Box::new(IRInstruction::Load(n.clone())),
+                                    right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(1))),
+                                };
+                                func.body.push(sub);
+                                Ok(IRInstruction::Store(n.clone()))
+                            }
+                        } else {
+                            Err("Unsupported dec target".to_string())
                         }
                     }
                     JaUnaryOp::Minus => {
                         let e = Box::new(self.generate_expr(expr, func)?);
                         Ok(IRInstruction::BinOp { op: IROp::Sub, left: Box::new(IRInstruction::LoadConst(IRConstValue::Int(0))), right: e })
                     }
-                    _ => Err(format!("Unsupported unary op {:?}", op))
+                    JaUnaryOp::Plus => {
+                        self.generate_expr(expr, func)
+                    }
+                    JaUnaryOp::Not => {
+                        let e = Box::new(self.generate_expr(expr, func)?);
+                        Ok(IRInstruction::Compare {
+                            op: IRCmpOp::Eq,
+                            left: e,
+                            right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(0))),
+                        })
+                    }
+                    JaUnaryOp::BitNot => {
+                        let e = Box::new(self.generate_expr(expr, func)?);
+                        Ok(IRInstruction::BinOp { op: IROp::Xor, left: e, right: Box::new(IRInstruction::LoadConst(IRConstValue::Int(-1))) })
+                    }
                 }
             }
             JaExpr::MethodCall { target, name, args, .. } => {
@@ -599,6 +796,40 @@ impl JaToIrGenerator {
                 }
 
                 Ok(IRInstruction::Call { func: name.clone(), args: ir_args })
+            }
+            JaExpr::Ternary { cond, true_expr, false_expr } => {
+                let cond_val = self.generate_expr(cond, func)?;
+                func.body.push(cond_val);
+                let else_label = self.next_label("tern_else");
+                let end_label = self.next_label("tern_end");
+                let result_var = self.next_label("tern_result");
+                func.body.push(IRInstruction::VarDecl { name: result_var.clone(), ir_type: IRType::I64 });
+                func.body.push(IRInstruction::BranchIfFalse(else_label.clone()));
+                let tv = self.generate_expr(true_expr, func)?;
+                func.body.push(tv);
+                func.body.push(IRInstruction::Store(result_var.clone()));
+                func.body.push(IRInstruction::Jump(end_label.clone()));
+                func.body.push(IRInstruction::Label(else_label));
+                let fv = self.generate_expr(false_expr, func)?;
+                func.body.push(fv);
+                func.body.push(IRInstruction::Store(result_var.clone()));
+                func.body.push(IRInstruction::Label(end_label));
+                Ok(IRInstruction::Load(result_var))
+            }
+            JaExpr::Cast { ty, expr } => {
+                // For now, just generate the inner expression (native types are all register-width)
+                let _ir_type = self.type_checker.resolve_type(ty)?;
+                self.generate_expr(expr, func)
+            }
+            JaExpr::Instanceof { expr, ty: _, pattern_name } => {
+                // Simplified: always returns true for now (full vtable check in future)
+                let _e = self.generate_expr(expr, func)?;
+                if let Some(pname) = pattern_name {
+                    func.body.push(IRInstruction::VarDecl { name: pname.clone(), ir_type: IRType::Ptr });
+                    func.body.push(_e);
+                    func.body.push(IRInstruction::Store(pname.clone()));
+                }
+                Ok(IRInstruction::LoadConst(IRConstValue::Bool(true)))
             }
             _ => Err(format!("Unimplemented IR Generation for Expr: {:?}", expr))
         }

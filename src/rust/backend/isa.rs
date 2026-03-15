@@ -137,6 +137,50 @@ impl ISATranslator {
                 self.code.extend_from_slice(&[0xFF, 0xD0]);
                 self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]);
             }
+            IRInstruction::Return => {
+                // Value is already in RAX from the preceding expression
+                self.code.push(0xC9); // leave
+                self.code.push(0xC3); // ret
+            }
+            IRInstruction::ReturnVoid => {
+                self.code.push(0xC9); // leave
+                self.code.push(0xC3); // ret
+            }
+            IRInstruction::PrintNewline => {
+                let fn_ptr = crate::backend::jit::jdb_print_newline as *const () as u64;
+                self.code.extend_from_slice(&[0x48, 0xB8]);
+                self.code.extend_from_slice(&fn_ptr.to_le_bytes());
+                self.code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]);
+                self.code.extend_from_slice(&[0xFF, 0xD0]);
+                self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]);
+            }
+            IRInstruction::PrintFloat => {
+                let fn_ptr = crate::backend::jit::jdb_print_float as *const () as u64;
+                // xmm0 already has the float value
+                self.code.extend_from_slice(&[0x48, 0xB8]);
+                self.code.extend_from_slice(&fn_ptr.to_le_bytes());
+                self.code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]);
+                self.code.extend_from_slice(&[0xFF, 0xD0]);
+                self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]);
+            }
+            IRInstruction::PrintChar => {
+                let fn_ptr = crate::backend::jit::jdb_print_char as *const () as u64;
+                self.code.extend_from_slice(&[0x48, 0x89, 0xC1]); // mov rcx, rax
+                self.code.extend_from_slice(&[0x48, 0xB8]);
+                self.code.extend_from_slice(&fn_ptr.to_le_bytes());
+                self.code.extend_from_slice(&[0x48, 0x81, 0xEC, 0x20, 0x00, 0x00, 0x00]);
+                self.code.extend_from_slice(&[0xFF, 0xD0]);
+                self.code.extend_from_slice(&[0x48, 0x81, 0xC4, 0x20, 0x00, 0x00, 0x00]);
+            }
+            IRInstruction::Break | IRInstruction::Continue => {
+                // These are handled at a higher level in a full implementation
+                // For now, they are structural markers
+            }
+            IRInstruction::TryBegin(_) | IRInstruction::TryEnd | IRInstruction::ClearError |
+            IRInstruction::FinallyBegin | IRInstruction::FinallyEnd |
+            IRInstruction::Raise { .. } | IRInstruction::CheckError(_) => {
+                // Exception handling is structural in v1.0
+            }
             IRInstruction::GCPlusScopeEnter { .. } | IRInstruction::GCPlusScopeExit { .. } |
             IRInstruction::GCPlusLoopAlloc { .. } | IRInstruction::GCPlusLoopReuse { .. } | 
             IRInstruction::GCPlusLoopFree { .. } | IRInstruction::GCPlusEscapeCheck { .. } => {}
@@ -156,6 +200,17 @@ impl ISATranslator {
                 let v = if *b { 1i64 } else { 0i64 };
                 self.code.extend_from_slice(&[0x48, 0xB8]);
                 self.code.extend_from_slice(&v.to_le_bytes());
+            }
+            IRInstruction::LoadConst(IRConstValue::Float(f)) => {
+                // Load float as i64 bits into rax, then movq xmm0, rax
+                let bits = f.to_bits();
+                self.code.extend_from_slice(&[0x48, 0xB8]);
+                self.code.extend_from_slice(&bits.to_le_bytes());
+                // movq xmm0, rax: 66 48 0F 6E C0
+                self.code.extend_from_slice(&[0x66, 0x48, 0x0F, 0x6E, 0xC0]);
+            }
+            IRInstruction::LoadConst(IRConstValue::None) => {
+                self.code.extend_from_slice(&[0x48, 0x31, 0xC0]); // xor rax, rax
             }
             IRInstruction::Load(name) => {
                 let off = *var_map.get(name).unwrap_or(&0);
@@ -300,9 +355,9 @@ impl ISATranslator {
                 self.code.push(0x58); // pop rax
                 
                 match op {
-                    IROp::Add => self.code.extend_from_slice(&[0x48, 0x01, 0xD8]),
-                    IROp::Sub => self.code.extend_from_slice(&[0x48, 0x29, 0xD8]),
-                    IROp::Mul => self.code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC3]),
+                    IROp::Add => self.code.extend_from_slice(&[0x48, 0x01, 0xD8]),       // add rax, rbx
+                    IROp::Sub => self.code.extend_from_slice(&[0x48, 0x29, 0xD8]),       // sub rax, rbx
+                    IROp::Mul => self.code.extend_from_slice(&[0x48, 0x0F, 0xAF, 0xC3]),// imul rax, rbx
                     IROp::Div | IROp::Mod => {
                         self.code.extend_from_slice(&[0x48, 0x99]); // cqo
                         self.code.extend_from_slice(&[0x48, 0xF7, 0xFB]); // idiv rbx
@@ -310,6 +365,17 @@ impl ISATranslator {
                             self.code.extend_from_slice(&[0x48, 0x89, 0xD0]); // mov rax, rdx
                         }
                     }
+                    IROp::Shl => {
+                        self.code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx
+                        self.code.extend_from_slice(&[0x48, 0xD3, 0xE0]); // shl rax, cl
+                    }
+                    IROp::Shr => {
+                        self.code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx
+                        self.code.extend_from_slice(&[0x48, 0xD3, 0xF8]); // sar rax, cl
+                    }
+                    IROp::And => self.code.extend_from_slice(&[0x48, 0x21, 0xD8]),       // and rax, rbx
+                    IROp::Or  => self.code.extend_from_slice(&[0x48, 0x09, 0xD8]),       // or rax, rbx
+                    IROp::Xor => self.code.extend_from_slice(&[0x48, 0x31, 0xD8]),       // xor rax, rbx
                     _ => {}
                 }
             }

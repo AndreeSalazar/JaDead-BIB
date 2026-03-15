@@ -177,6 +177,39 @@ pub extern "C" fn jdb_print_int(val: i64) {
     }
 }
 
+#[no_mangle]
+pub extern "C" fn jdb_print_float(val: f64) {
+    if let Ok(mut buf) = PRINT_BUFFER.lock() {
+        use std::fmt::Write;
+        let _ = writeln!(buf, "{}", val);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_print_char(val: i64) {
+    if let Ok(mut buf) = PRINT_BUFFER.lock() {
+        if let Some(c) = char::from_u32(val as u32) {
+            buf.push(c);
+            buf.push('\n');
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_print_newline() {
+    if let Ok(mut buf) = PRINT_BUFFER.lock() {
+        buf.push('\n');
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn jdb_print_bool(val: i64) {
+    if let Ok(mut buf) = PRINT_BUFFER.lock() {
+        use std::fmt::Write;
+        let _ = writeln!(buf, "{}", if val != 0 { "true" } else { "false" });
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CpuFeatures {
     pub has_avx2: bool,

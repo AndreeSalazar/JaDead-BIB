@@ -171,12 +171,34 @@ impl JaParser {
         }
     }
 
+    fn parse_type_params(&mut self) -> Vec<String> {
+        let mut params = Vec::new();
+        if self.match_token(&JaToken::Less) {
+            if let Ok(name) = self.parse_identifier() {
+                params.push(name);
+                // Skip optional bounds: extends Foo
+                if self.match_token(&JaToken::Extends) {
+                    let _ = self.parse_type(); // consume bound type
+                }
+            }
+            while self.match_token(&JaToken::Comma) {
+                if let Ok(name) = self.parse_identifier() {
+                    params.push(name);
+                    if self.match_token(&JaToken::Extends) {
+                        let _ = self.parse_type();
+                    }
+                }
+            }
+            let _ = self.consume(&JaToken::Greater, "closing > for type params");
+        }
+        params
+    }
+
     fn parse_class_decl(&mut self, modifiers: Vec<JaModifier>) -> Result<JaTypeDecl, String> {
         self.consume(&JaToken::Class, "class keyword")?;
         let name = self.parse_identifier()?;
         
-        // Type params placeholder
-        let type_params = Vec::new(); // TODO: <T,U>
+        let type_params = self.parse_type_params();
         
         let mut extends = None;
         if self.match_token(&JaToken::Extends) {
@@ -212,7 +234,7 @@ impl JaParser {
     fn parse_interface_decl(&mut self, modifiers: Vec<JaModifier>) -> Result<JaTypeDecl, String> {
         self.consume(&JaToken::Interface, "interface keyword")?;
         let name = self.parse_identifier()?;
-        let type_params = Vec::new(); 
+        let type_params = self.parse_type_params();
         
         let mut extends = Vec::new();
         if self.match_token(&JaToken::Extends) {
@@ -243,7 +265,7 @@ impl JaParser {
     fn parse_record_decl(&mut self, modifiers: Vec<JaModifier>) -> Result<JaTypeDecl, String> {
         self.consume(&JaToken::Record, "record keyword")?;
         let name = self.parse_identifier()?;
-        let type_params = Vec::new();
+        let type_params = self.parse_type_params();
         
         // Record components: (int x, String y)
         self.consume(&JaToken::LParen, "record components start")?;
@@ -487,7 +509,10 @@ impl JaParser {
         if self.check(&JaToken::LBrace) { return Ok(JaStmt::Block(self.parse_block()?)); }
         if self.match_token(&JaToken::If) { return self.parse_if_stmt(); }
         if self.match_token(&JaToken::While) { return self.parse_while_stmt(); }
+        if self.match_token(&JaToken::Do) { return self.parse_do_while_stmt(); }
         if self.match_token(&JaToken::For) { return self.parse_for_stmt(); }
+        if self.match_token(&JaToken::Switch) { return self.parse_switch_stmt(); }
+        if self.match_token(&JaToken::Try) { return self.parse_try_stmt(); }
         if self.match_token(&JaToken::Return) {
             let expr = if self.match_token(&JaToken::Semicolon) { None } else {
                 let e = self.parse_expr()?;
@@ -495,6 +520,28 @@ impl JaParser {
                 Some(e)
             };
             return Ok(JaStmt::Return(expr));
+        }
+        if self.match_token(&JaToken::Break) {
+            let label = if let Some(JaToken::Identifier(_)) = self.peek() {
+                Some(self.parse_identifier()?)
+            } else { None };
+            self.consume(&JaToken::Semicolon, "after break")?;
+            return Ok(JaStmt::Break(label));
+        }
+        if self.match_token(&JaToken::Continue) {
+            let label = if let Some(JaToken::Identifier(_)) = self.peek() {
+                Some(self.parse_identifier()?)
+            } else { None };
+            self.consume(&JaToken::Semicolon, "after continue")?;
+            return Ok(JaStmt::Continue(label));
+        }
+        if self.match_token(&JaToken::Throw) {
+            let expr = self.parse_expr()?;
+            self.consume(&JaToken::Semicolon, "after throw")?;
+            return Ok(JaStmt::Throw(expr));
+        }
+        if self.match_token(&JaToken::Semicolon) {
+            return Ok(JaStmt::Empty);
         }
 
         if self.is_local_var_decl() {
@@ -532,8 +579,30 @@ impl JaParser {
         Ok(JaStmt::While { cond, body })
     }
 
+    fn parse_do_while_stmt(&mut self) -> Result<JaStmt, String> {
+        let body = Box::new(self.parse_stmt()?);
+        self.consume(&JaToken::While, "do-while 'while' keyword")?;
+        self.consume(&JaToken::LParen, "do-while cond start")?;
+        let cond = self.parse_expr()?;
+        self.consume(&JaToken::RParen, "do-while cond end")?;
+        self.consume(&JaToken::Semicolon, "after do-while")?;
+        Ok(JaStmt::DoWhile { body, cond })
+    }
+
     fn parse_for_stmt(&mut self) -> Result<JaStmt, String> {
         self.consume(&JaToken::LParen, "for start")?;
+
+        // Check for enhanced for (for-each): Type name : iterable
+        if self.is_for_each() {
+            let ty = self.parse_type()?;
+            let name = self.parse_identifier()?;
+            self.consume(&JaToken::Colon, "for-each colon")?;
+            let iterable = self.parse_expr()?;
+            self.consume(&JaToken::RParen, "for-each end")?;
+            let body = Box::new(self.parse_stmt()?);
+            return Ok(JaStmt::ForEach { ty, name, iterable, body });
+        }
+
         let init = if self.match_token(&JaToken::Semicolon) { None } else {
             if self.is_local_var_decl() {
                 let ty = self.parse_type()?;
@@ -554,11 +623,150 @@ impl JaParser {
         let mut update = Vec::new();
         if !self.check(&JaToken::RParen) {
             update.push(self.parse_expr()?);
+            while self.match_token(&JaToken::Comma) {
+                update.push(self.parse_expr()?);
+            }
         }
         self.consume(&JaToken::RParen, "for end")?;
         
         let body = Box::new(self.parse_stmt()?);
         Ok(JaStmt::For { init, cond, update, body })
+    }
+
+    fn is_for_each(&self) -> bool {
+        // Enhanced for: Type Identifier : expr
+        let mut p = self.pos;
+        // Skip type
+        match self.tokens.get(p) {
+            Some(JaToken::Int) | Some(JaToken::Long) | Some(JaToken::Float) | Some(JaToken::Double) |
+            Some(JaToken::Boolean) | Some(JaToken::Char) | Some(JaToken::Byte) | Some(JaToken::Short) => { p += 1; }
+            Some(JaToken::Identifier(_)) => {
+                p += 1;
+                while let Some(JaToken::Dot) = self.tokens.get(p) {
+                    p += 1;
+                    if let Some(JaToken::Identifier(_)) = self.tokens.get(p) { p += 1; } else { return false; }
+                }
+                // Skip generics
+                if let Some(JaToken::Less) = self.tokens.get(p) {
+                    let mut depth = 1; p += 1;
+                    while depth > 0 && p < self.tokens.len() {
+                        match self.tokens.get(p) {
+                            Some(JaToken::Less) => depth += 1,
+                            Some(JaToken::Greater) => depth -= 1,
+                            _ => {}
+                        }
+                        p += 1;
+                    }
+                }
+            }
+            _ => return false,
+        }
+        // Skip array brackets
+        while let Some(JaToken::LBracket) = self.tokens.get(p) {
+            p += 1;
+            if let Some(JaToken::RBracket) = self.tokens.get(p) { p += 1; } else { return false; }
+        }
+        // Should be Identifier then Colon
+        if let Some(JaToken::Identifier(_)) = self.tokens.get(p) {
+            p += 1;
+            if let Some(JaToken::Colon) = self.tokens.get(p) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn parse_switch_stmt(&mut self) -> Result<JaStmt, String> {
+        self.consume(&JaToken::LParen, "switch expr start")?;
+        let expr = self.parse_expr()?;
+        self.consume(&JaToken::RParen, "switch expr end")?;
+        self.consume(&JaToken::LBrace, "switch body start")?;
+        
+        let mut cases = Vec::new();
+        while !self.check(&JaToken::RBrace) && !self.check(&JaToken::Eof) {
+            let mut labels = Vec::new();
+            let mut is_arrow = false;
+
+            if self.match_token(&JaToken::Case) {
+                labels.push(self.parse_expr()?);
+                while self.match_token(&JaToken::Comma) {
+                    labels.push(self.parse_expr()?);
+                }
+                if self.match_token(&JaToken::Arrow) {
+                    is_arrow = true;
+                } else {
+                    self.consume(&JaToken::Colon, "after case label")?;
+                }
+            } else if self.match_token(&JaToken::Default) {
+                // labels stays empty = default
+                if self.match_token(&JaToken::Arrow) {
+                    is_arrow = true;
+                } else {
+                    self.consume(&JaToken::Colon, "after default label")?;
+                }
+            } else {
+                return Err(format!("Expected case or default in switch, got {:?}", self.peek()));
+            }
+
+            let mut body = Vec::new();
+            if is_arrow {
+                if self.check(&JaToken::LBrace) {
+                    body.push(JaStmt::Block(self.parse_block()?));
+                } else {
+                    let e = self.parse_expr()?;
+                    self.consume(&JaToken::Semicolon, "after arrow case expr")?;
+                    body.push(JaStmt::Expr(e));
+                }
+            } else {
+                while !self.check(&JaToken::Case) && !self.check(&JaToken::Default) 
+                    && !self.check(&JaToken::RBrace) && !self.check(&JaToken::Eof) {
+                    body.push(self.parse_stmt()?);
+                }
+            }
+            cases.push(JaSwitchCase { labels, is_arrow, body });
+        }
+        self.consume(&JaToken::RBrace, "switch body end")?;
+        Ok(JaStmt::Switch { expr, cases })
+    }
+
+    fn parse_try_stmt(&mut self) -> Result<JaStmt, String> {
+        // Try-with-resources
+        let mut resources = Vec::new();
+        if self.match_token(&JaToken::LParen) {
+            while !self.check(&JaToken::RParen) {
+                let ty = self.parse_type()?;
+                let name = self.parse_identifier()?;
+                self.consume(&JaToken::Assign, "resource init")?;
+                let init_expr = self.parse_expr()?;
+                resources.push(JaLocalVarDecl { ty, name, init: Some(init_expr) });
+                if !self.match_token(&JaToken::Semicolon) {
+                    break;
+                }
+            }
+            self.consume(&JaToken::RParen, "try resources end")?;
+        }
+
+        let body = self.parse_block()?;
+
+        let mut catches = Vec::new();
+        while self.match_token(&JaToken::Catch) {
+            self.consume(&JaToken::LParen, "catch param start")?;
+            let mut types = Vec::new();
+            types.push(self.parse_type()?);
+            while self.match_token(&JaToken::Pipe) {
+                types.push(self.parse_type()?);
+            }
+            let param_name = self.parse_identifier()?;
+            self.consume(&JaToken::RParen, "catch param end")?;
+            let catch_body = self.parse_block()?;
+            catches.push(JaCatchClause { types, param_name, body: catch_body });
+        }
+
+        let finally_block = if self.match_token(&JaToken::Finally) {
+            Some(self.parse_block()?)
+        } else { None };
+
+        Ok(JaStmt::Try { resources, body, catches, finally_block })
     }
 
     fn is_local_var_decl(&self) -> bool {
@@ -567,6 +775,9 @@ impl JaParser {
         if let Some(tok) = self.tokens.get(p) {
             match tok {
                 JaToken::Int | JaToken::Long | JaToken::Float | JaToken::Double | JaToken::Boolean | JaToken::Char | JaToken::Byte | JaToken::Short => {
+                    ok = true; p += 1;
+                }
+                JaToken::Var => {
                     ok = true; p += 1;
                 }
                 JaToken::Identifier(_) => {
@@ -605,16 +816,88 @@ impl JaParser {
     }
 
     fn parse_assignment(&mut self) -> Result<JaExpr, String> {
-        let left = self.parse_equality()?;
-        if self.match_token(&JaToken::Assign) {
+        let left = self.parse_ternary()?;
+        let assign_op = match self.peek() {
+            Some(JaToken::Assign) => Some(JaAssignOp::Assign),
+            Some(JaToken::PlusAssign) => Some(JaAssignOp::AddAssign),
+            Some(JaToken::MinusAssign) => Some(JaAssignOp::SubAssign),
+            Some(JaToken::StarAssign) => Some(JaAssignOp::MulAssign),
+            Some(JaToken::SlashAssign) => Some(JaAssignOp::DivAssign),
+            Some(JaToken::PercentAssign) => Some(JaAssignOp::RemAssign),
+            Some(JaToken::AmpAssign) => Some(JaAssignOp::AndAssign),
+            Some(JaToken::PipeAssign) => Some(JaAssignOp::OrAssign),
+            Some(JaToken::CaretAssign) => Some(JaAssignOp::XorAssign),
+            Some(JaToken::LShiftAssign) => Some(JaAssignOp::ShlAssign),
+            Some(JaToken::RShiftAssign) => Some(JaAssignOp::ShrAssign),
+            Some(JaToken::URShiftAssign) => Some(JaAssignOp::UShrAssign),
+            _ => None,
+        };
+        if let Some(op) = assign_op {
+            self.advance();
             let right = self.parse_assignment()?;
-            Ok(JaExpr::Assign { op: JaAssignOp::Assign, target: Box::new(left), value: Box::new(right) })
-        } else if self.match_token(&JaToken::PlusAssign) {
-            let right = self.parse_assignment()?;
-            Ok(JaExpr::Assign { op: JaAssignOp::AddAssign, target: Box::new(left), value: Box::new(right) })
+            Ok(JaExpr::Assign { op, target: Box::new(left), value: Box::new(right) })
         } else {
             Ok(left)
         }
+    }
+
+    fn parse_ternary(&mut self) -> Result<JaExpr, String> {
+        let expr = self.parse_logical_or()?;
+        if self.match_token(&JaToken::Question) {
+            let true_expr = self.parse_expr()?;
+            self.consume(&JaToken::Colon, "ternary ':' expected")?;
+            let false_expr = self.parse_ternary()?;
+            Ok(JaExpr::Ternary { cond: Box::new(expr), true_expr: Box::new(true_expr), false_expr: Box::new(false_expr) })
+        } else {
+            Ok(expr)
+        }
+    }
+
+    fn parse_logical_or(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_logical_and()?;
+        while self.match_token(&JaToken::OrOr) {
+            let right = self.parse_logical_and()?;
+            expr = JaExpr::Binary { op: JaBinOp::Or, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_logical_and(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_bitwise_or()?;
+        while self.match_token(&JaToken::AndAnd) {
+            let right = self.parse_bitwise_or()?;
+            expr = JaExpr::Binary { op: JaBinOp::And, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_or(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_bitwise_xor()?;
+        while self.check(&JaToken::Pipe) {
+            self.advance();
+            let right = self.parse_bitwise_xor()?;
+            expr = JaExpr::Binary { op: JaBinOp::BitOr, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_xor(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_bitwise_and()?;
+        while self.match_token(&JaToken::Caret) {
+            let right = self.parse_bitwise_and()?;
+            expr = JaExpr::Binary { op: JaBinOp::BitXor, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
+    }
+
+    fn parse_bitwise_and(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_equality()?;
+        while self.check(&JaToken::Ampersand) {
+            self.advance();
+            let right = self.parse_equality()?;
+            expr = JaExpr::Binary { op: JaBinOp::BitAnd, left: Box::new(expr), right: Box::new(right) };
+        }
+        Ok(expr)
     }
 
     fn parse_equality(&mut self) -> Result<JaExpr, String> {
@@ -633,13 +916,44 @@ impl JaParser {
     }
 
     fn parse_relational(&mut self) -> Result<JaExpr, String> {
+        let mut expr = self.parse_shift()?;
+        loop {
+            if let Some(tok) = self.peek() {
+                match tok {
+                    JaToken::Less | JaToken::Greater | JaToken::LessEq | JaToken::GreaterEq => {
+                        let op = match self.peek().unwrap() {
+                            JaToken::Less => JaBinOp::Lt,
+                            JaToken::Greater => JaBinOp::Gt,
+                            JaToken::LessEq => JaBinOp::Le,
+                            JaToken::GreaterEq => JaBinOp::Ge,
+                            _ => unreachable!(),
+                        };
+                        self.advance();
+                        let right = self.parse_shift()?;
+                        expr = JaExpr::Binary { op, left: Box::new(expr), right: Box::new(right) };
+                    }
+                    JaToken::Instanceof => {
+                        self.advance();
+                        let ty = self.parse_type()?;
+                        let pattern_name = if let Some(JaToken::Identifier(_)) = self.peek() {
+                            Some(self.parse_identifier()?)
+                        } else { None };
+                        expr = JaExpr::Instanceof { expr: Box::new(expr), ty, pattern_name };
+                    }
+                    _ => break,
+                }
+            } else { break; }
+        }
+        Ok(expr)
+    }
+
+    fn parse_shift(&mut self) -> Result<JaExpr, String> {
         let mut expr = self.parse_additive()?;
         while let Some(tok) = self.peek() {
             let op = match tok {
-                JaToken::Less => JaBinOp::Lt,
-                JaToken::Greater => JaBinOp::Gt,
-                JaToken::LessEq => JaBinOp::Le,
-                JaToken::GreaterEq => JaBinOp::Ge,
+                JaToken::LShift => JaBinOp::Shl,
+                JaToken::RShift => JaBinOp::Shr,
+                JaToken::URShift => JaBinOp::UShr,
                 _ => break,
             };
             self.advance();
@@ -684,21 +998,66 @@ impl JaParser {
         if self.match_token(&JaToken::Minus) {
             let expr = self.parse_unary()?;
             return Ok(JaExpr::Unary { op: JaUnaryOp::Minus, expr: Box::new(expr), is_postfix: false });
-        } else if self.match_token(&JaToken::Not) {
+        }
+        if self.match_token(&JaToken::Plus) {
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Unary { op: JaUnaryOp::Plus, expr: Box::new(expr), is_postfix: false });
+        }
+        if self.match_token(&JaToken::Not) {
             let expr = self.parse_unary()?;
             return Ok(JaExpr::Unary { op: JaUnaryOp::Not, expr: Box::new(expr), is_postfix: false });
         }
-        
+        if self.match_token(&JaToken::Tilde) {
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Unary { op: JaUnaryOp::BitNot, expr: Box::new(expr), is_postfix: false });
+        }
         if self.match_token(&JaToken::PlusPlus) {
             let expr = self.parse_unary()?;
             return Ok(JaExpr::Unary { op: JaUnaryOp::Inc, expr: Box::new(expr), is_postfix: false });
         }
+        if self.match_token(&JaToken::MinusMinus) {
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Unary { op: JaUnaryOp::Dec, expr: Box::new(expr), is_postfix: false });
+        }
+
+        // Cast: (Type) expr
+        if self.check(&JaToken::LParen) && self.is_cast() {
+            self.advance(); // consume (
+            let ty = self.parse_type()?;
+            self.consume(&JaToken::RParen, "cast closing )")?;
+            let expr = self.parse_unary()?;
+            return Ok(JaExpr::Cast { ty, expr: Box::new(expr) });
+        }
 
         let mut expr = self.parse_primary_or_access()?;
+        // Postfix operators
         if self.match_token(&JaToken::PlusPlus) {
             expr = JaExpr::Unary { op: JaUnaryOp::Inc, expr: Box::new(expr), is_postfix: true };
+        } else if self.match_token(&JaToken::MinusMinus) {
+            expr = JaExpr::Unary { op: JaUnaryOp::Dec, expr: Box::new(expr), is_postfix: true };
         }
         Ok(expr)
+    }
+
+    fn is_cast(&self) -> bool {
+        // Heuristic: (Type) is a cast if the next token after ( is a primitive or known class type
+        // followed by ) and then an expression
+        if self.peek() != Some(&JaToken::LParen) { return false; }
+        let mut p = self.pos + 1;
+        match self.tokens.get(p) {
+            Some(JaToken::Int) | Some(JaToken::Long) | Some(JaToken::Float) | Some(JaToken::Double) |
+            Some(JaToken::Boolean) | Some(JaToken::Char) | Some(JaToken::Byte) | Some(JaToken::Short) => {
+                p += 1;
+                // Allow array dimensions
+                while let Some(JaToken::LBracket) = self.tokens.get(p) {
+                    p += 1;
+                    if let Some(JaToken::RBracket) = self.tokens.get(p) { p += 1; } else { return false; }
+                }
+                if let Some(JaToken::RParen) = self.tokens.get(p) { return true; }
+            }
+            _ => {}
+        }
+        false
     }
 
     fn parse_primary_or_access(&mut self) -> Result<JaExpr, String> {
@@ -706,6 +1065,26 @@ impl JaParser {
             Some(JaToken::IntLiteral(_)) => {
                 if let JaToken::IntLiteral(v) = self.advance().unwrap() {
                     JaExpr::IntLiteral(*v)
+                } else { unreachable!() }
+            }
+            Some(JaToken::LongLiteral(_)) => {
+                if let JaToken::LongLiteral(v) = self.advance().unwrap() {
+                    JaExpr::LongLiteral(*v)
+                } else { unreachable!() }
+            }
+            Some(JaToken::FloatLiteral(_)) => {
+                if let JaToken::FloatLiteral(v) = self.advance().unwrap() {
+                    JaExpr::FloatLiteral(*v)
+                } else { unreachable!() }
+            }
+            Some(JaToken::DoubleLiteral(_)) => {
+                if let JaToken::DoubleLiteral(v) = self.advance().unwrap() {
+                    JaExpr::DoubleLiteral(*v)
+                } else { unreachable!() }
+            }
+            Some(JaToken::CharLiteral(_)) => {
+                if let JaToken::CharLiteral(v) = self.advance().unwrap() {
+                    JaExpr::CharLiteral(*v)
                 } else { unreachable!() }
             }
             Some(JaToken::StringLiteral(_)) | Some(JaToken::TextBlock(_)) => {
@@ -717,6 +1096,13 @@ impl JaParser {
             Some(JaToken::False) => { self.advance(); JaExpr::BooleanLiteral(false) }
             Some(JaToken::Null) => { self.advance(); JaExpr::Null }
             Some(JaToken::This) => { self.advance(); JaExpr::Name("this".to_string()) }
+            Some(JaToken::Super) => { self.advance(); JaExpr::Name("super".to_string()) }
+            Some(JaToken::LParen) => {
+                self.advance(); // consume (
+                let inner = self.parse_expr()?;
+                self.consume(&JaToken::RParen, "closing parenthesis")?;
+                inner
+            }
             Some(JaToken::New) => {
                 self.advance();
                 
@@ -864,5 +1250,154 @@ mod tests {
             }
             _ => panic!("Expected class"),
         }
+    }
+
+    #[test]
+    fn test_parse_do_while() {
+        let code = "class A { void f() { do { int x = 1; } while (x > 0); } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_switch_statement() {
+        let code = "class A { void f() { switch (x) { case 1: break; case 2: break; default: break; } } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_try_catch_finally() {
+        let code = "class A { void f() { try { int x = 1; } catch (Exception e) { int y = 2; } finally { int z = 3; } } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_for_each() {
+        let code = "class A { void f() { for (int x : arr) { System.out.println(x); } } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_ternary() {
+        let code = "class A { void f() { int x = a > b ? a : b; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_logical_operators() {
+        let code = "class A { void f() { boolean r = a && b || c; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_bitwise_operators() {
+        let code = "class A { void f() { int r = a & b | c ^ d; int s = x << 2; int t = ~y; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_instanceof() {
+        let code = "class A { void f() { if (x instanceof String s) { return; } } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_cast() {
+        let code = "class A { void f() { int x = (int) 3.14; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_type_params() {
+        let code = "class Container<T, U extends Comparable> { T value; }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        match &unit.declarations[0] {
+            JaTypeDecl::Class { name, type_params, .. } => {
+                assert_eq!(name, "Container");
+                assert_eq!(type_params.len(), 2);
+                assert_eq!(type_params[0], "T");
+                assert_eq!(type_params[1], "U");
+            }
+            _ => panic!("Expected generic class"),
+        }
+    }
+
+    #[test]
+    fn test_parse_break_continue() {
+        let code = "class A { void f() { while (true) { if (x > 0) break; continue; } } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_decrement() {
+        let code = "class A { void f() { int x = 10; x--; --x; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_var_decl() {
+        let code = "class A { void f() { var x = 42; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_enum() {
+        let code = "enum Color { RED, GREEN, BLUE }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        match &unit.declarations[0] {
+            JaTypeDecl::Enum { name, constants, .. } => {
+                assert_eq!(name, "Color");
+                assert_eq!(constants.len(), 3);
+            }
+            _ => panic!("Expected enum"),
+        }
+    }
+
+    #[test]
+    fn test_parse_all_assign_ops() {
+        let code = "class A { void f() { x += 1; x -= 2; x *= 3; x /= 4; x %= 5; x &= 6; x |= 7; x ^= 8; } }";
+        let lexer = JaLexer::new(code);
+        let mut parser = JaParser::new(lexer);
+        let unit = parser.parse_compilation_unit().unwrap();
+        assert_eq!(unit.declarations.len(), 1);
     }
 }

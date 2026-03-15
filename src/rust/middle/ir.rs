@@ -1,13 +1,13 @@
 // ============================================================
-// PyDead-BIB IR (Intermediate Representation)
+// JaDead-BIB IR (Intermediate Representation) 💀☕
 // ============================================================
-// ADeadOp SSA-form — heredado de ADead-BIB v8.0
+// ADeadOp SSA-form — Java Nativo sin JVM
 // Tipos explícitos en cada instrucción
 // BasicBlocks — sin ambigüedad semántica
-// GIL eliminado: cada objeto tiene ownership ✓
+// GC eliminado: cada objeto tiene ownership ✓
 // ============================================================
 
-/// IR Type — maps Python types to machine types
+/// IR Type — maps Java types to machine types
 #[derive(Debug, Clone, PartialEq)]
 pub enum IRType {
     Void,
