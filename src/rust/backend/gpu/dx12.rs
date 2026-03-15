@@ -281,6 +281,12 @@ pub extern "C" fn jdb_dx12_destroy() -> i64 {
     { 0 }
 }
 
+/// Check if DX12 is available (JIT-callable)
+#[no_mangle]
+pub extern "C" fn jdb_dx12_is_available() -> i64 {
+    if is_available() { 1 } else { 0 }
+}
+
 /// Check if DX12 is available on this system
 pub fn is_available() -> bool {
     #[cfg(target_os = "windows")]

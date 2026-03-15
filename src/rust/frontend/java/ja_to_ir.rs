@@ -795,6 +795,73 @@ impl JaToIrGenerator {
                     return Ok(IRInstruction::Call { func: "jdb_string_eq".to_string(), args: vec![ir_args[0].clone(), ir_args[1].clone()] });
                 }
 
+                // ── GPU / Window Native Dispatch ────────────────────
+                // Maps Class.method() → jdb_* native function calls
+                // Java → x86-64 directo, sin JVM, sin JNI
+                if let Some(t) = target {
+                    let class_name = match &**t {
+                        JaExpr::Name(n) => Some(n.as_str()),
+                        _ => None,
+                    };
+
+                    if let Some(cls) = class_name {
+                        let native_fn = match (cls, name.as_str()) {
+                            // OpenGL
+                            ("OpenGL", "init")         => Some("jdb_gl_init"),
+                            ("OpenGL", "getVersion")   => Some("jdb_gl_get_version"),
+                            ("OpenGL", "getRenderer")  => Some("jdb_gl_get_renderer"),
+                            ("OpenGL", "clear")        => Some("jdb_gl_clear"),
+                            ("OpenGL", "destroy")      => Some("jdb_gl_destroy"),
+                            ("OpenGL", "isAvailable")  => Some("jdb_gl_is_available"),
+                            // Vulkan
+                            ("Vulkan", "init")         => Some("jdb_vk_init"),
+                            ("Vulkan", "getVersion")   => Some("jdb_vk_get_version"),
+                            ("Vulkan", "getDevice")    => Some("jdb_vk_get_device"),
+                            ("Vulkan", "destroy")      => Some("jdb_vk_destroy"),
+                            ("Vulkan", "isAvailable")  => Some("jdb_vk_is_available"),
+                            // DirectX12
+                            ("DirectX12", "init")           => Some("jdb_dx12_init"),
+                            ("DirectX12", "getFeatureLevel") => Some("jdb_dx12_get_feature_level"),
+                            ("DirectX12", "getAdapter")     => Some("jdb_dx12_get_adapter"),
+                            ("DirectX12", "destroy")        => Some("jdb_dx12_destroy"),
+                            ("DirectX12", "isAvailable")    => Some("jdb_dx12_is_available"),
+                            // Graphics (window + auto-detect)
+                            ("Graphics", "createWindow")     => Some("jdb_window_create"),
+                            ("Graphics", "destroyWindow")    => Some("jdb_window_destroy"),
+                            ("Graphics", "pollEvents")       => Some("jdb_window_poll_events"),
+                            ("Graphics", "windowShouldClose") => Some("jdb_window_should_close"),
+                            ("Graphics", "swapBuffers")      => Some("jdb_window_swap_buffers"),
+                            ("Graphics", "setTitle")         => Some("jdb_window_set_title"),
+                            ("Graphics", "sleep")            => Some("jdb_sleep_ms"),
+                            ("Graphics", "timeMs")           => Some("jdb_time_ms"),
+                            ("Graphics", "detectBest")       => Some("jdb_gpu_detect_best_name"),
+                            // Math
+                            ("Math", "sin")   => Some("jdb_math_sin"),
+                            ("Math", "cos")   => Some("jdb_math_cos"),
+                            ("Math", "sqrt")  => Some("jdb_math_sqrt"),
+                            ("Math", "abs")   => Some("jdb_math_abs"),
+                            ("Math", "floor") => Some("jdb_math_floor"),
+                            ("Math", "ceil")  => Some("jdb_math_ceil"),
+                            ("Math", "pow")   => Some("jdb_math_pow"),
+                            ("Math", "log")   => Some("jdb_math_log"),
+                            ("Math", "round") => Some("jdb_math_round"),
+                            ("Math", "min")   => Some("jdb_math_min"),
+                            ("Math", "max")   => Some("jdb_math_max"),
+                            _ => None,
+                        };
+
+                        if let Some(fn_name) = native_fn {
+                            // Skip the target (class name) from args — only pass actual arguments
+                            let actual_args: Vec<IRInstruction> = if ir_args.len() > 0 {
+                                ir_args[1..].to_vec()  // Skip ir_args[0] which is Load("OpenGL") etc.
+                            } else {
+                                vec![]
+                            };
+                            return Ok(IRInstruction::Call { func: fn_name.to_string(), args: actual_args });
+                        }
+                    }
+                }
+
                 Ok(IRInstruction::Call { func: name.clone(), args: ir_args })
             }
             JaExpr::Ternary { cond, true_expr, false_expr } => {

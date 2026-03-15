@@ -331,11 +331,43 @@ impl ISATranslator {
                 }
                 
                 let fn_ptr = match func.as_str() {
+                    // String API
                     "jdb_string_len" => crate::backend::jit::jdb_string_len as *const () as u64,
                     "jdb_string_eq" => crate::backend::jit::jdb_string_eq as *const () as u64,
                     "jdb_string_concat" => crate::backend::jit::jdb_string_concat as *const () as u64,
                     "jdb_print_str" => crate::backend::jit::jdb_print_str as *const () as u64,
                     "jdb_print_obj" => crate::backend::jit::jdb_print_obj as *const () as u64,
+                    // OpenGL
+                    "jdb_gl_init" => crate::backend::gpu::opengl::jdb_gl_init as *const () as u64,
+                    "jdb_gl_get_version" => crate::backend::gpu::opengl::jdb_gl_get_version as *const () as u64,
+                    "jdb_gl_get_renderer" => crate::backend::gpu::opengl::jdb_gl_get_renderer as *const () as u64,
+                    "jdb_gl_clear" => crate::backend::gpu::opengl::jdb_gl_clear as *const () as u64,
+                    "jdb_gl_destroy" => crate::backend::gpu::opengl::jdb_gl_destroy as *const () as u64,
+                    "jdb_gl_is_available" => crate::backend::gpu::opengl::jdb_gl_is_available as *const () as u64,
+                    // Vulkan
+                    "jdb_vk_init" => crate::backend::gpu::vulkan::jdb_vk_init as *const () as u64,
+                    "jdb_vk_get_version" => crate::backend::gpu::vulkan::jdb_vk_get_version as *const () as u64,
+                    "jdb_vk_get_device" => crate::backend::gpu::vulkan::jdb_vk_get_device as *const () as u64,
+                    "jdb_vk_destroy" => crate::backend::gpu::vulkan::jdb_vk_destroy as *const () as u64,
+                    "jdb_vk_is_available" => crate::backend::gpu::vulkan::jdb_vk_is_available as *const () as u64,
+                    // DirectX12
+                    "jdb_dx12_init" => crate::backend::gpu::dx12::jdb_dx12_init as *const () as u64,
+                    "jdb_dx12_get_feature_level" => crate::backend::gpu::dx12::jdb_dx12_get_feature_level as *const () as u64,
+                    "jdb_dx12_get_adapter" => crate::backend::gpu::dx12::jdb_dx12_get_adapter as *const () as u64,
+                    "jdb_dx12_destroy" => crate::backend::gpu::dx12::jdb_dx12_destroy as *const () as u64,
+                    "jdb_dx12_is_available" => crate::backend::gpu::dx12::jdb_dx12_is_available as *const () as u64,
+                    // Window
+                    "jdb_window_create" => crate::backend::gpu::window::jdb_window_create as *const () as u64,
+                    "jdb_window_destroy" => crate::backend::gpu::window::jdb_window_destroy as *const () as u64,
+                    "jdb_window_poll_events" => crate::backend::gpu::window::jdb_window_poll_events as *const () as u64,
+                    "jdb_window_should_close" => crate::backend::gpu::window::jdb_window_should_close as *const () as u64,
+                    "jdb_window_swap_buffers" => crate::backend::gpu::window::jdb_window_swap_buffers as *const () as u64,
+                    "jdb_window_set_title" => crate::backend::gpu::window::jdb_window_set_title as *const () as u64,
+                    "jdb_sleep_ms" => crate::backend::gpu::window::jdb_sleep_ms as *const () as u64,
+                    "jdb_time_ms" => crate::backend::gpu::window::jdb_time_ms as *const () as u64,
+                    // GPU auto-detect
+                    "jdb_gpu_detect_best" => crate::backend::gpu::jdb_gpu_detect_best as *const () as u64,
+                    "jdb_gpu_detect_best_name" => crate::backend::gpu::jdb_gpu_detect_best_name as *const () as u64,
                     _ => 0,
                 };
                 
