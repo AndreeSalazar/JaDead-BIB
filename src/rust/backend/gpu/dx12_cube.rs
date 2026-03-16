@@ -615,12 +615,11 @@ pub extern "C" fn jdb_dx12_create_pso(
                 let handle = D3D12CpuDescriptorHandle {
                     ptr: rtv_handle.ptr + (i as u64) * (rs.rtv_descriptor_size as u64),
                 };
-                // ID3D12Device::CreateRenderTargetView
-                // d3d12.h says index 20, but 18 was working before
-                // Trying 18 to debug
-                vtable_call!(device, 18,
-                    extern "system" fn(usize, usize, usize, u64),
-                    resource, 0usize, handle.ptr);
+                // ID3D12Device::CreateRenderTargetView = vtable index 20
+                // Pass D3D12_CPU_DESCRIPTOR_HANDLE by pointer for Rust extern "system" ABI compat
+                vtable_call!(device, 20,
+                    extern "system" fn(usize, usize, usize, *const D3D12CpuDescriptorHandle),
+                    resource, 0usize, &handle);
             }
             eprintln!("✅ [DX12:Pure] RTV Heap + {} Render Targets created", BUFFER_COUNT);
 
@@ -794,9 +793,8 @@ pub extern "C" fn jdb_dx12_create_pso(
                 0xad, 0xf6, 0xbe, 0x5a, 0x60, 0xd9, 0x5a, 0x76,
             ];
             let mut fence: usize = 0;
-            // ID3D12Device::CreateFence — empirically determined
-            // Header says 36 but RTV was 18 not 20 (shift -2)
-            let hr = vtable_call!(device, 34,
+            // ID3D12Device::CreateFence = vtable index 36
+            let hr = vtable_call!(device, 36,
                 extern "system" fn(usize, u64, u32, *const [u8; 16], *mut usize) -> i32,
                 0u64, D3D12_FENCE_FLAG_NONE, &iid_fence, &mut fence);
             if hr < 0 || fence == 0 {
@@ -819,7 +817,7 @@ pub extern "C" fn jdb_dx12_create_pso(
             ];
             let mut cmd_list: usize = 0;
             // ID3D12Device::CreateCommandList = vtable index 12
-            // (device, nodeMask, type, pAllocator, pInitialState, riid, ppCommandList)
+            eprintln!("  [DX12:Debug] Creating command list... device=0x{:X} alloc=0x{:X}", device, cmd_alloc);
             let hr = vtable_call!(device, 12,
                 extern "system" fn(usize, u32, u32, usize, usize, *const [u8; 16], *mut usize) -> i32,
                 0u32, D3D12_COMMAND_LIST_TYPE_DIRECT, cmd_alloc, 0usize, &iid_cmd_list, &mut cmd_list);
@@ -859,8 +857,8 @@ pub extern "C" fn jdb_dx12_create_pso(
                 flags: 0,
             };
             let mut vb_resource: usize = 0;
-            // ID3D12Device::CreateCommittedResource — header says 27, shift -2 = 25
-            let hr = vtable_call!(device, 25,
+            // ID3D12Device::CreateCommittedResource = vtable index 27
+            let hr = vtable_call!(device, 27,
                 extern "system" fn(usize, *const D3D12HeapProperties, u32, *const D3D12ResourceDesc, u32, usize, *const [u8; 16], *mut usize) -> i32,
                 &heap_props, 0u32, &res_desc, D3D12_RESOURCE_STATE_GENERIC_READ, 0usize, &iid_resource, &mut vb_resource);
             if hr < 0 || vb_resource == 0 {
@@ -950,6 +948,7 @@ pub extern "C" fn jdb_dx12_create_pso(
             // Copy shader bytecode before releasing blobs
             let vs_data = vtable_call!(vs_blob, 3, extern "system" fn(usize) -> *const u8);
             let vs_size = vtable_call!(vs_blob, 4, extern "system" fn(usize) -> usize);
+            eprintln!("  [DX12:Debug] VS bytecode: ptr=0x{:X} size={}", vs_data as usize, vs_size);
             let mut vs_bytecode = vec![0u8; vs_size];
             std::ptr::copy_nonoverlapping(vs_data, vs_bytecode.as_mut_ptr(), vs_size);
 
@@ -1220,10 +1219,11 @@ pub extern "C" fn jdb_dx12_clear_rtv(_list: i64, r: i64, g: i64, b: i64) -> i64 
             };
 
             // ClearRenderTargetView = vtable index 48
+            // Pass D3D12_CPU_DESCRIPTOR_HANDLE as u64 (by value in register)
             let color: [f32; 4] = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
             vtable_call!(cmd_list, 48,
-                extern "system" fn(usize, D3D12CpuDescriptorHandle, *const [f32; 4], u32, usize),
-                rtv_handle, &color, 0u32, 0usize);
+                extern "system" fn(usize, u64, *const [f32; 4], u32, usize),
+                rtv_handle.ptr, &color, 0u32, 0usize);
 
             // RSSetViewports = vtable index 21
             let viewport = D3D12Viewport {
