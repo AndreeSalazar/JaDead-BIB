@@ -583,25 +583,39 @@ pub extern "C" fn jdb_dx12_create_pso(
                 extern "system" fn(usize, u32) -> u32,
                 D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
 
-            // Get CPU descriptor handle for start of RTV heap
-            // ID3D12DescriptorHeap::GetCPUDescriptorHandleForHeapStart = vtable index 9
-            // This method returns by value into a struct passed as hidden first param on MSVC x64
-            let mut rtv_handle = D3D12CpuDescriptorHandle { ptr: 0 };
-            vtable_call!(rtv_heap, 9,
-                extern "system" fn(usize, *mut D3D12CpuDescriptorHandle) -> *mut D3D12CpuDescriptorHandle,
-                &mut rtv_handle);
+            // ── GetCPUDescriptorHandleForHeapStart ───────────────
+            // COM vtable index 9 on ID3D12DescriptorHeap
+            // COM uses C-style hidden return pointer: fn(this, *mut RetVal)
+            let mut rtv_handle_start: usize = 0;
+            {
+                let heap_vt = *(rtv_heap as *const *const usize);
+                let get_handle_fn: extern "system" fn(usize, *mut usize) -> usize =
+                    std::mem::transmute(*heap_vt.add(9));
+                get_handle_fn(rtv_heap, &mut rtv_handle_start);
+            }
+            eprintln!("  [DX12:Lib] HeapStart = 0x{:X}", rtv_handle_start);
+            if rtv_handle_start == 0 {
+                eprintln!("💀 [DX12] GetCPUDescriptorHandleForHeapStart returned 0!");
+                return 0;
+            }
 
             // Create RTVs for each buffer
-            // IID for ID3D12Resource
-            // IID_ID3D12Resource = {696442BE-A72E-4059-BC79-5B5C98040FAD}
             let iid_resource: [u8; 16] = [
                 0xbe, 0x42, 0x64, 0x69, 0x2e, 0xa7, 0x59, 0x40,
                 0xbc, 0x79, 0x5b, 0x5c, 0x98, 0x04, 0x0f, 0xad,
             ];
-            eprintln!("  [DX12:Debug] RTV desc size={}, handle start=0x{:X}", rs.rtv_descriptor_size, rtv_handle.ptr);
+            eprintln!("  [DX12:Lib] RTV desc size={}", rs.rtv_descriptor_size);
+
+            // Debug: dump device vtable entries around CreateRenderTargetView
+            {
+                let dev_vt = *(device as *const *const usize);
+                for idx in 18..=22 {
+                    eprintln!("  [DX12:Lib] Device vtable[{}] = 0x{:X}", idx, *dev_vt.add(idx));
+                }
+            }
+
             for i in 0..BUFFER_COUNT {
                 let mut resource: usize = 0;
-                // IDXGISwapChain::GetBuffer = vtable index 9
                 let hr = vtable_call!(swap_chain1, 9,
                     extern "system" fn(usize, u32, *const [u8; 16], *mut usize) -> i32,
                     i, &iid_resource, &mut resource);
@@ -610,16 +624,26 @@ pub extern "C" fn jdb_dx12_create_pso(
                     return 0;
                 }
                 rs.render_targets[i as usize] = resource;
-                eprintln!("  [DX12:Debug] Buffer {} = 0x{:X}", i, resource);
 
-                let handle = D3D12CpuDescriptorHandle {
-                    ptr: rtv_handle.ptr + (i as u64) * (rs.rtv_descriptor_size as u64),
-                };
-                // ID3D12Device::CreateRenderTargetView = vtable index 20
-                // Pass D3D12_CPU_DESCRIPTOR_HANDLE by pointer for Rust extern "system" ABI compat
-                vtable_call!(device, 20,
-                    extern "system" fn(usize, usize, usize, *const D3D12CpuDescriptorHandle),
-                    resource, 0usize, &handle);
+                let handle_value: usize = rtv_handle_start + (i as usize) * (rs.rtv_descriptor_size as usize);
+                eprintln!("  [DX12:Lib] Buffer[{}]=0x{:X} handle=0x{:X}", i, resource, handle_value);
+
+                // Get the function pointer from vtable index 20
+                let dev_vt = *(device as *const *const usize);
+                let crtv_fn_ptr = *dev_vt.add(20);
+                eprintln!("  [DX12:Lib] CreateRTV fn=0x{:X} calling...", crtv_fn_ptr);
+
+                // Call CreateRenderTargetView via vtable index 20
+                // Signature: void(this, pResource, pDesc, DestDescriptor)
+                // Try calling as if it returns HRESULT (i32) to capture debug layer errors
+                let crtv_result = vtable_call!(device, 20,
+                    extern "system" fn(usize, usize, usize, usize) -> i32,
+                    resource, 0usize, handle_value);
+                if crtv_result < 0 {
+                    eprintln!("💀 [DX12:Lib] CreateRTV FAILED hr=0x{:08X}", crtv_result as u32);
+                    return 0;
+                }
+                eprintln!("  [DX12:Lib] CreateRTV ✅ buffer {} (hr=0x{:X})", i, crtv_result as u32);
             }
             eprintln!("✅ [DX12:Pure] RTV Heap + {} Render Targets created", BUFFER_COUNT);
 
@@ -1210,20 +1234,19 @@ pub extern "C" fn jdb_dx12_clear_rtv(_list: i64, r: i64, g: i64, b: i64) -> i64 
             let rtv_heap = rs.rtv_heap;
 
             // Get RTV handle for current frame
-            let mut rtv_start = D3D12CpuDescriptorHandle { ptr: 0 };
+            // ✅ FIX: GetCPUDescriptorHandleForHeapStart returns via *mut usize
+            let mut rtv_start_val: usize = 0;
             vtable_call!(rtv_heap, 9,
-                extern "system" fn(usize, *mut D3D12CpuDescriptorHandle) -> *mut D3D12CpuDescriptorHandle,
-                &mut rtv_start);
-            let rtv_handle = D3D12CpuDescriptorHandle {
-                ptr: rtv_start.ptr + (rs.frame_index as u64) * (rs.rtv_descriptor_size as u64),
-            };
+                extern "system" fn(usize, *mut usize) -> *mut usize,
+                &mut rtv_start_val);
+            let rtv_handle_val: usize = rtv_start_val + (rs.frame_index as usize) * (rs.rtv_descriptor_size as usize);
 
             // ClearRenderTargetView = vtable index 48
-            // Pass D3D12_CPU_DESCRIPTOR_HANDLE as u64 (by value in register)
+            // Handle passed as u64 by value in register (already correct)
             let color: [f32; 4] = [r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0];
             vtable_call!(cmd_list, 48,
                 extern "system" fn(usize, u64, *const [f32; 4], u32, usize),
-                rtv_handle.ptr, &color, 0u32, 0usize);
+                rtv_handle_val as u64, &color, 0u32, 0usize);
 
             // RSSetViewports = vtable index 21
             let viewport = D3D12Viewport {
@@ -1241,10 +1264,11 @@ pub extern "C" fn jdb_dx12_clear_rtv(_list: i64, r: i64, g: i64, b: i64) -> i64 
                 extern "system" fn(usize, u32, *const D3D12Rect),
                 1u32, &scissor);
 
-            // OMSetRenderTargets = vtable index 46
+            // ✅ FIX: OMSetRenderTargets = vtable index 46
+            // Pass handle as *const usize (pointer to the raw value)
             vtable_call!(cmd_list, 46,
-                extern "system" fn(usize, u32, *const D3D12CpuDescriptorHandle, i32, usize),
-                1u32, &rtv_handle, 0i32, 0usize);
+                extern "system" fn(usize, u32, *const usize, i32, usize),
+                1u32, &rtv_handle_val, 0i32, 0usize);
         }
         1
     }

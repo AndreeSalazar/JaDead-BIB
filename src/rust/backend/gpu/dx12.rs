@@ -1,4 +1,4 @@
-﻿// ============================================================
+// ============================================================
 // DirectX 12 Native Dispatch — JaDead-BIB 💀☕
 // ============================================================
 // HISTÓRICO: Primer Java con DX12 nativo
@@ -119,6 +119,31 @@ pub extern "C" fn jdb_dx12_get_feature_level() -> i64 {
         }
 
         unsafe {
+            // ── Enable D3D12 Debug Layer (before device creation) ──
+            let debug_proc_name = CString::new("D3D12GetDebugInterface").unwrap();
+            let debug_proc = GetProcAddress(ctx.d3d12_handle, debug_proc_name.as_ptr());
+            if debug_proc != 0 {
+                let iid_debug: [u8; 16] = [
+                    0xb7, 0x88, 0x44, 0x34, 0x46, 0x68, 0x4b, 0x47,
+                    0xb9, 0x89, 0xf0, 0x27, 0x44, 0x82, 0x45, 0xe0,
+                ];
+                type GetDebugFn = extern "system" fn(*const [u8; 16], *mut usize) -> i32;
+                let get_debug: GetDebugFn = std::mem::transmute(debug_proc);
+                let mut debug_iface: usize = 0;
+                let hr = get_debug(&iid_debug, &mut debug_iface);
+                if hr >= 0 && debug_iface != 0 {
+                    let dbg_vt = *(debug_iface as *const *const usize);
+                    let enable_fn: extern "system" fn(usize) =
+                        std::mem::transmute(*dbg_vt.add(3));
+                    enable_fn(debug_iface);
+                    // Release debug interface
+                    let release_fn: extern "system" fn(usize) -> u32 =
+                        std::mem::transmute(*dbg_vt.add(2));
+                    release_fn(debug_iface);
+                    eprintln!("  [DX12:Lib] 🔍 Debug Layer ENABLED");
+                }
+            }
+
             // Try D3D12CreateDevice with nullptr adapter to test feature level
             let proc_name = CString::new("D3D12CreateDevice").unwrap();
             let proc = GetProcAddress(ctx.d3d12_handle, proc_name.as_ptr());
