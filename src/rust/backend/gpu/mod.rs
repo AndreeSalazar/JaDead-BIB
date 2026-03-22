@@ -12,7 +12,6 @@ pub mod window;
 pub mod gl_cube;
 #[allow(static_mut_refs)]
 pub mod vk_cube;
-pub mod dx12_cube;
 
 // ── GPU Auto-detect ─────────────────────────────────────────
 
