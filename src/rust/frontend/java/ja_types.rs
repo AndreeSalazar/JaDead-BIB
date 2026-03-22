@@ -6,7 +6,7 @@
 // ============================================================
 
 use super::ja_ast::JaType;
-use crate::middle::ir::IRType;
+use crate::middle::ja_ir::IRType;
 
 pub struct JaTypeChecker;
 

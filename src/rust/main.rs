@@ -1,17 +1,13 @@
-pub mod frontend;
-pub mod middle;
-pub mod backend;
-pub mod gc_plus;
-
-use frontend::java::ja_lexer::JaLexer;
-use frontend::java::ja_parser::JaParser;
-use frontend::java::ja_to_ir::JaToIrGenerator;
-use frontend::java::ja_preprocessor::JaPreprocessor;
-use frontend::java::ja_import_resolver::JaImportResolver;
-use middle::ub_detector::UbDetector;
-use backend::isa::ISATranslator;
-use backend::pe::PeExporter;
-use backend::jit::{JitExecutor, hash_source, jdb_flush_prints};
+use jadead_bib::frontend::java::ja_lexer::JaLexer;
+use jadead_bib::frontend::java::ja_parser::JaParser;
+use jadead_bib::frontend::java::ja_to_ir::JaToIrGenerator;
+use jadead_bib::frontend::java::ja_preprocessor::JaPreprocessor;
+use jadead_bib::frontend::java::ja_import_resolver::JaImportResolver;
+use jadead_bib::middle::ub_detector::UbDetector;
+use jadead_bib::backend::isa::ISATranslator;
+use jadead_bib::backend::pe::PeExporter;
+use jadead_bib::backend::jit::{JitExecutor, hash_source, jdb_flush_prints};
+use jadead_bib::builder::{Builder, BuildOptions};
 
 use std::env;
 use std::fs;
@@ -32,25 +28,74 @@ const C_CYBER: &str = "\x1b[38;5;45m";// Cyberpunk blue
 const C_RAD: &str = "\x1b[38;5;196m"; // Radical Red
 
 fn print_header() {
-    println!("{C_TITLE}╔══════════════════════════════════════════════════════════════╗");
-    println!("║   {C_CYBER}JaDead-BIB v1.0 💀☕{C_TITLE}                             ║");
-    println!("║   {C_RAD}Java Nativo — Sin JVM — Sin GC — Sin Runtime{C_TITLE}        ║");
-    println!("╚═══════════════════════════════════════════════════════════════════════╝{C_RESET}");
+    println!("{C_TITLE}╔═══════════════════════════════════════════════════════════════╗");
+    println!("║   {C_CYBER}JaDead-BIB v2.0 💀☕🦈{C_TITLE}                            ║");
+    println!("║   {C_RAD}Java + C Nativo — Sin JVM — Sin GC — Sin Runtime{C_TITLE}     ║");
+    println!("╚════════════════════════════════════════════════════════════════════════╝{C_RESET}");
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
     
-    if args.len() < 3 {
-        println!("{C_TITLE}Uso:{C_RESET} jab run <archivo.java>    {C_DIM}(In-Memory Execution - JIT 2.0){C_RESET}");
+    if args.len() < 2 {
+        print_header();
+        println!("{C_TITLE}Uso:{C_RESET}");
+        println!("  {C_TEXT}Java:{C_RESET}");
+        println!("     jab run <archivo.java>    {C_DIM}(In-Memory Execution - JIT 2.0){C_RESET}");
         println!("     jab java <archivo.java>   {C_DIM}(Exportar .exe nativo){C_RESET}");
         println!("     jab step <archivo.java>   {C_DIM}(Modo Análisis y verbose){C_RESET}");
+        println!("  {C_TEXT}C:{C_RESET}");
+        println!("     jab cc <archivo.c>        {C_DIM}(Compilar C a .exe nativo){C_RESET}");
+        println!("     jab build <archivo.c>     {C_DIM}(Auto-detect y compilar){C_RESET}");
         process::exit(1);
     }
 
-    let mode = args[1].as_str();
-    if mode != "java" && mode != "run" && mode != "step" {
-        println!("Comando desconocido: {}", mode);
+    let command = args[1].as_str();
+
+    // ── C Compiler Commands ─────────────────────────────────
+    if command == "cc" || command == "c" {
+        if args.len() < 3 {
+            eprintln!("{C_ERR}❌ Error: Missing C source file{C_RESET}");
+            eprintln!("   Usage: jab cc <file.c> [-o output.exe]");
+            process::exit(1);
+        }
+        print_header();
+        compile_c_file(&args[2], &args);
+        return;
+    }
+
+    // ── Auto-detect by extension ────────────────────────────
+    if command == "build" {
+        if args.len() < 3 {
+            eprintln!("{C_ERR}❌ Error: Missing source file{C_RESET}");
+            process::exit(1);
+        }
+        let input_file = &args[2];
+        let ext = std::path::Path::new(input_file)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        print_header();
+        match ext {
+            "c" | "h" => { compile_c_file(input_file, &args); return; }
+            "java" => { /* fall through to Java pipeline */ }
+            _ => {
+                eprintln!("{C_ERR}❌ Error: Unknown extension '.{}'{C_RESET}", ext);
+                eprintln!("   Supported: .java, .c");
+                process::exit(1);
+            }
+        }
+    }
+
+    // ── Java Commands ───────────────────────────────────────
+    if args.len() < 3 {
+        eprintln!("{C_ERR}❌ Error: Missing source file{C_RESET}");
+        process::exit(1);
+    }
+
+    let mode = command;
+    if mode != "java" && mode != "run" && mode != "step" && mode != "build" {
+        println!("{C_ERR}Comando desconocido: {}{C_RESET}", mode);
         process::exit(1);
     }
 
@@ -58,9 +103,7 @@ fn main() {
     let _is_run_mode = mode == "run";
     let file_path = &args[2];
 
-    if is_step_mode || true {
-        print_header();
-    }
+    print_header();
 
     println!("  {C_TEXT}Source:{C_RESET}   {}", file_path);
     println!("  {C_TEXT}Language:{C_RESET} Java 21");
@@ -211,6 +254,38 @@ fn main() {
                 eprintln!("{C_ERR}[JIT 2.0] Error de ejecución: {}{C_RESET}", e);
                 process::exit(1);
             }
+        }
+    }
+}
+
+fn compile_c_file(input: &str, args: &[String]) {
+    let output = args.iter()
+        .position(|a| a == "-o")
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.clone())
+        .unwrap_or_else(|| input.replace(".c", ".exe"));
+
+    println!("  {C_TEXT}Source:{C_RESET}   {}", input);
+    println!("  {C_TEXT}Language:{C_RESET} C99");
+    println!("  {C_TEXT}Output:{C_RESET}   {}", output);
+    println!();
+
+    let start = std::time::Instant::now();
+    let options = BuildOptions {
+        output_path: output.clone(),
+        ..Default::default()
+    };
+
+    match Builder::build_file(input, options) {
+        Ok(()) => {
+            let dur = start.elapsed();
+            println!("{C_OK}✅ C compilation completed{C_RESET}");
+            println!("   {} generated successfully.", output);
+            println!("   {C_DIM}Time: {:?}{C_RESET}", dur);
+        }
+        Err(e) => {
+            eprintln!("{C_ERR}❌ C compilation failed: {}{C_RESET}", e);
+            process::exit(1);
         }
     }
 }

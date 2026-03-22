@@ -5,7 +5,7 @@
 // This bypasses bytecode, Javac, and JVM entirely.
 // ============================================================
 
-use crate::middle::ir::*;
+use crate::middle::ja_ir::*;
 use std::collections::HashMap;
 
 pub struct ISATranslator {
@@ -111,7 +111,7 @@ impl ISATranslator {
                 }
             }
             IRInstruction::PrintStr(s) => {
-                let boxed_str = Box::leak(s.clone().into_boxed_str());
+                let boxed_str: &'static str = Box::leak(s.clone().into_boxed_str());
                 let ptr = boxed_str.as_ptr() as u64;
                 let len = boxed_str.len() as u64;
                 let fn_ptr = crate::backend::jit::jdb_print_str as *const () as u64;
@@ -301,7 +301,7 @@ impl ISATranslator {
                 // Zero extend to 64-bit just in case, though mov eax zero-extends implicitly
             }
             IRInstruction::LoadString(s) => {
-                let boxed_str = Box::leak(s.clone().into_boxed_str());
+                let boxed_str: &'static str = Box::leak(s.clone().into_boxed_str());
                 let jdb_str = Box::new(crate::backend::jit::JdbString {
                     ptr: boxed_str.as_ptr(),
                     len: boxed_str.len() as u32,

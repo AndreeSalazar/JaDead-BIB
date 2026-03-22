@@ -15,7 +15,7 @@
 
 use crate::frontend::java::ja_ast::*;
 use crate::gc_plus::cycle_breaker::CycleBreaker;
-use crate::middle::ir::{IRFunction, IRInstruction, IROp, IRConstValue, IRType};
+use crate::middle::ja_ir::{IRFunction, IRInstruction, IROp, IRConstValue, IRType};
 
 /// Java-specific undefined behavior types
 #[derive(Debug, Clone, PartialEq)]

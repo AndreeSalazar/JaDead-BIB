@@ -1,9 +1,9 @@
-﻿[package]
+[package]
 name = "jab"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["Eddi Andreé Salazar Matos"]
-description = "JaDead-BIB: Java nativo, sin JVM, sin GC"
+description = "JaDead-BIB: Java + C nativo, sin JVM, sin GC, sin C++"
 
 [[bin]]
 name = "jab"
@@ -14,3 +14,13 @@ name = "jadead_bib"
 path = "src/rust/lib.rs"
 
 [dependencies]
+nom = "7.1"
+object = { version = "0.36", features = ["write_core"] }
+goblin = "0.7"
+pelite = "0.10"
+
+# Vulkan - GPU backend
+ash = "0.38"
+gpu-allocator = "0.27"
+
+# JaDead-BIB es Java + C — Sin C++ — 100% Rust backend

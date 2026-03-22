@@ -12,6 +12,26 @@ pub mod window;
 pub mod gl_cube;
 #[allow(static_mut_refs)]
 pub mod vk_cube;
+#[allow(static_mut_refs)]
+pub mod gpu_detect;
+#[allow(static_mut_refs)]
+pub mod compute;
+#[allow(static_mut_refs)]
+pub mod memory;
+#[allow(static_mut_refs)]
+pub mod metrics;
+#[allow(static_mut_refs)]
+pub mod scheduler;
+#[allow(static_mut_refs)]
+pub mod unified_pipeline;
+#[allow(static_mut_refs)]
+pub mod vulkan_runtime;
+#[allow(static_mut_refs)]
+pub mod hex;
+#[allow(static_mut_refs)]
+pub mod hip;
+#[allow(static_mut_refs)]
+pub mod spirv;
 
 // ── GPU Auto-detect ─────────────────────────────────────────
 

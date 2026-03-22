@@ -1,4 +1,12 @@
-﻿// ============================================================
+// ADead-BIB GPU Backend - CUDA
+// Generación directa de PTX/CUDA para NVIDIA
+// Solo funciona en GPUs NVIDIA
+
+pub mod runtime;
+
+pub use runtime::*;
+
+// ============================================================
 // CUDA Native Dispatch — JaDead-BIB 💀☕
 // ============================================================
 // Java → CUDA sin JVM, sin JNI
@@ -169,7 +177,7 @@ extern "system" {
 }
 
 #[cfg(test)]
-mod tests {
+mod tests_jadead {
     use super::*;
 
     #[test]

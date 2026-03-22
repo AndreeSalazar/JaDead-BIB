@@ -6,7 +6,7 @@
 // ============================================================
 
 use super::ja_ast::*;
-use crate::middle::ir::*;
+use crate::middle::ja_ir::*;
 use super::ja_types::JaTypeChecker;
 use crate::gc_plus::scope_tracker::ScopeTracker;
 use crate::gc_plus::loop_anticipator::LoopAnticipator;

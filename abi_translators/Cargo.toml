@@ -1,0 +1,16 @@
+[package]
+name = "abi-translators"
+version = "1.0.0"
+edition = "2021"
+authors = ["Andree Salazar"]
+description = "ADead-BIB ABI Translators — Binary Frontend: PE/ELF/SPIR-V/DXIL → ADead-BIB IR"
+
+[[bin]]
+name = "abi-translate"
+path = "src/main.rs"
+
+[lib]
+name = "abi_translators"
+path = "src/lib.rs"
+
+[dependencies]
